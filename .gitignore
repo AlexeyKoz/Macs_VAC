@@ -1,0 +1,23 @@
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+
+# --- Python caches / build ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+
+# --- App-generated output ---
+results/
+templates/
+match_debug.png
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

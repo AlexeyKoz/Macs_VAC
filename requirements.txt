@@ -1,0 +1,26 @@
+# MACS Visual Automation — Python dependencies
+# Install with:  pip install -r requirements.txt
+#
+# NOTE: OCR steps ("OCR check" / "Verify text") additionally require the
+# Tesseract OCR *engine* installed on the system (not a pip package).
+# See the README for install instructions.
+
+# --- GUI framework ---
+PySide6>=6.6.0            # Qt 6 bindings (main window, table, overlay)
+
+# --- Screen automation (mouse / keyboard) ---
+pyautogui>=0.9.54         # clicks, key presses, typing
+
+# --- Screen capture (multi-monitor aware) ---
+mss>=9.0.1               # fast full virtual-desktop screenshots
+
+# --- Image processing / template matching ---
+opencv-python>=4.9.0     # multi-scale template + edge matching
+numpy>=1.26.0            # array backend for OpenCV
+Pillow>=10.0.0           # image crop/save, PIL <-> Qt conversion
+
+# --- OCR (Python wrapper for the Tesseract engine) ---
+pytesseract>=0.3.10      # requires the Tesseract engine (see README)
+
+# --- Window enumeration ("Find window" Alt+Tab search) ---
+PyGetWindow>=0.0.9       # list / activate / minimize windows on Windows
