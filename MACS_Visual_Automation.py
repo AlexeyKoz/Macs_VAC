@@ -107,6 +107,58 @@ TESSERACT_HINT = (
 CONFIDENCE = 0.8
 
 
+def template_meta_path(image_path):
+    """Sidecar JSON next to the template PNG."""
+    base, _ = os.path.splitext(image_path)
+    return base + ".meta.json"
+
+
+def load_template_meta(image_path):
+    path = template_meta_path(image_path)
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+def save_template_meta(image_path, meta):
+    with open(template_meta_path(image_path), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+
+def default_template_meta(w, h):
+    return {
+        "compare_rect": [0, 0, w, h],
+        "exclude_rects": [],
+        "click_point": [w // 2, h // 2],
+    }
+
+
+def _clamp_rect(x, y, w, h, max_w, max_h):
+    x = max(0, min(x, max_w - 1))
+    y = max(0, min(y, max_h - 1))
+    w = max(1, min(w, max_w - x))
+    h = max(1, min(h, max_h - y))
+    return x, y, w, h
+
+
+def _build_compare_mask(compare_rect, exclude_rects):
+    """Mask for cv2.matchTemplate: 255 = use pixel, 0 = ignore."""
+    cx, cy, cw, ch = compare_rect
+    mask = np.full((ch, cw), 255, dtype=np.uint8)
+    for ex, ey, ew, eh in exclude_rects:
+        x1 = max(cx, ex)
+        y1 = max(cy, ey)
+        x2 = min(cx + cw, ex + ew)
+        y2 = min(cy + ch, ey + eh)
+        if x2 > x1 and y2 > y1:
+            mask[y1 - cy:y2 - cy, x1 - cx:x2 - cx] = 0
+    return mask
+
+
+TEMPLATE_ACTIONS = frozenset({"click_image", "double_click_image", "wait_image"})
+
+
 def grab_all():
     """Снимок ВСЕГО виртуального рабочего стола (все мониторы).
 
@@ -384,6 +436,7 @@ class Runner(QThread):
     def _locate(self, image_path, timeout, find_window=False):
         # Ищем шаблон по ВСЕМ мониторам через cv2 (pyautogui умеет только primary).
         # Многомасштабно + оттенки серого + контуры — устойчиво к DPI/теме/подсветке.
+        # .meta.json: compare_rect, exclude_rects (игнорировать), click_point.
         # find_window: если не нашли — перебираем окна (как Alt+Tab) и повторяем.
         # Возвращаем (x, y) в абсолютных координатах виртуального экрана.
         if not image_path or not os.path.exists(image_path):
@@ -391,9 +444,24 @@ class Runner(QThread):
         templ = cv2.imread(image_path, cv2.IMREAD_COLOR)
         if templ is None:
             raise FileNotFoundError(f"cannot read template image: {image_path}")
-        templ_gray = cv2.cvtColor(templ, cv2.COLOR_BGR2GRAY)
-        templ_edge = cv2.Canny(templ_gray, 50, 150)
-        th0, tw0 = templ_gray.shape[:2]
+
+        th0, tw0 = templ.shape[:2]
+        meta = load_template_meta(image_path)
+        if meta is None:
+            meta = default_template_meta(tw0, th0)
+
+        cx, cy, cw, ch = _clamp_rect(*meta["compare_rect"], tw0, th0)
+        compare_rect = (cx, cy, cw, ch)
+        exclude_rects = meta.get("exclude_rects") or []
+        cpx, cpy = meta.get("click_point", [tw0 // 2, th0 // 2])
+        cpx = max(0, min(int(cpx), tw0 - 1))
+        cpy = max(0, min(int(cpy), th0 - 1))
+
+        compare_bgr = templ[cy:cy + ch, cx:cx + cw]
+        compare_gray = cv2.cvtColor(compare_bgr, cv2.COLOR_BGR2GRAY)
+        compare_edge = cv2.Canny(compare_gray, 50, 150)
+        mask = _build_compare_mask(compare_rect, exclude_rects)
+        use_mask = bool(exclude_rects) and int(mask.sum()) > 0
 
         best = 0.0
         best_scale = 1.0
@@ -405,22 +473,29 @@ class Runner(QThread):
             scene_edge = cv2.Canny(scene, 50, 150)
             sh, sw = scene.shape[:2]
             for scale in self._SCALES:
-                tw, th = int(tw0 * scale), int(th0 * scale)
+                tw, th = int(cw * scale), int(ch * scale)
                 if tw < 8 or th < 8 or th > sh or tw > sw:
                     continue
                 interp = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
-                # 1) по яркости (точное совпадение внешнего вида)
-                tg = cv2.resize(templ_gray, (tw, th), interpolation=interp)
-                _, gv, _, gloc = cv2.minMaxLoc(cv2.matchTemplate(scene, tg, cv2.TM_CCOEFF_NORMED))
-                # 2) по контурам (устойчиво к подсветке/теме/цвету заливки)
-                te = cv2.resize(templ_edge, (tw, th), interpolation=interp)
-                _, ev, _, eloc = cv2.minMaxLoc(cv2.matchTemplate(scene_edge, te, cv2.TM_CCOEFF_NORMED))
+                tg = cv2.resize(compare_gray, (tw, th), interpolation=interp)
+                te = cv2.resize(compare_edge, (tw, th), interpolation=interp)
+                if use_mask:
+                    ms = cv2.resize(mask, (tw, th), interpolation=cv2.INTER_NEAREST)
+                    _, gv, _, gloc = cv2.minMaxLoc(
+                        cv2.matchTemplate(scene, tg, cv2.TM_CCORR_NORMED, mask=ms))
+                    _, ev, _, eloc = cv2.minMaxLoc(
+                        cv2.matchTemplate(scene_edge, te, cv2.TM_CCORR_NORMED, mask=ms))
+                else:
+                    _, gv, _, gloc = cv2.minMaxLoc(cv2.matchTemplate(scene, tg, cv2.TM_CCOEFF_NORMED))
+                    _, ev, _, eloc = cv2.minMaxLoc(cv2.matchTemplate(scene_edge, te, cv2.TM_CCOEFF_NORMED))
 
                 maxv, maxloc = (gv, gloc) if gv >= ev else (ev, eloc)
                 if maxv > best:
                     best, best_scale = maxv, scale
                 if maxv >= CONFIDENCE:
-                    return (left + maxloc[0] + tw // 2, top + maxloc[1] + th // 2)
+                    click_x = left + maxloc[0] - int(cx * scale) + int(cpx * scale)
+                    click_y = top + maxloc[1] - int(cy * scale) + int(cpy * scale)
+                    return (click_x, click_y)
             return None
 
         res = self._search(detect, timeout, find_window)
@@ -740,6 +815,252 @@ class SnipOverlay(QWidget):
 
 
 # ============================================================================
+# РЕДАКТОР ШАБЛОНА (сравнение / исключение / точка клика)
+# ============================================================================
+
+class TemplateEditorCanvas(QWidget):
+    """Рисуем на захваченном шаблоне: compare, exclude, click."""
+
+    def __init__(self, image_path):
+        super().__init__()
+        self._pix = QPixmap(image_path)
+        self._img_w = max(self._pix.width(), 1)
+        self._img_h = max(self._pix.height(), 1)
+        self._mode = "compare"
+        self._compare = QRect(0, 0, self._img_w, self._img_h)
+        self._excludes = []
+        self._click = QPoint(self._img_w // 2, self._img_h // 2)
+        self._origin = None
+        self._rubber = QRect()
+        self.setMinimumSize(480, 320)
+        self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
+
+    def set_mode(self, mode):
+        self._mode = mode
+        self._origin = None
+        self._rubber = QRect()
+        self.update()
+
+    def load_meta(self, meta):
+        cx, cy, cw, ch = meta.get("compare_rect", [0, 0, self._img_w, self._img_h])
+        cx, cy, cw, ch = _clamp_rect(cx, cy, cw, ch, self._img_w, self._img_h)
+        self._compare = QRect(cx, cy, cw, ch)
+        self._excludes = []
+        for r in meta.get("exclude_rects") or []:
+            if len(r) == 4:
+                x, y, w, h = _clamp_rect(*r, self._img_w, self._img_h)
+                self._excludes.append(QRect(x, y, w, h))
+        px, py = meta.get("click_point", [self._img_w // 2, self._img_h // 2])
+        self._click = QPoint(max(0, min(int(px), self._img_w - 1)),
+                             max(0, min(int(py), self._img_h - 1)))
+        self.update()
+
+    def get_meta(self):
+        c = self._compare
+        return {
+            "compare_rect": [c.x(), c.y(), c.width(), c.height()],
+            "exclude_rects": [[r.x(), r.y(), r.width(), r.height()] for r in self._excludes],
+            "click_point": [self._click.x(), self._click.y()],
+        }
+
+    def reset_compare_full(self):
+        self._compare = QRect(0, 0, self._img_w, self._img_h)
+        self.update()
+
+    def remove_last_exclude(self):
+        if self._excludes:
+            self._excludes.pop()
+            self.update()
+
+    def clear_excludes(self):
+        self._excludes.clear()
+        self.update()
+
+    def _layout(self):
+        scale = min(self.width() / self._img_w, self.height() / self._img_h)
+        dw, dh = self._img_w * scale, self._img_h * scale
+        ox = (self.width() - dw) / 2
+        oy = (self.height() - dh) / 2
+        return scale, ox, oy, dw, dh
+
+    def _img_to_disp_rect(self, rect):
+        scale, ox, oy, _, _ = self._layout()
+        return QRect(
+            int(ox + rect.x() * scale),
+            int(oy + rect.y() * scale),
+            max(1, int(rect.width() * scale)),
+            max(1, int(rect.height() * scale)),
+        )
+
+    def _img_to_disp_point(self, pt):
+        scale, ox, oy, _, _ = self._layout()
+        return QPoint(int(ox + pt.x() * scale), int(oy + pt.y() * scale))
+
+    def _disp_to_img(self, pt):
+        scale, ox, oy, dw, dh = self._layout()
+        if pt.x() < ox or pt.y() < oy or pt.x() > ox + dw or pt.y() > oy + dh:
+            return None
+        ix = int((pt.x() - ox) / scale)
+        iy = int((pt.y() - oy) / scale)
+        return QPoint(max(0, min(ix, self._img_w - 1)), max(0, min(iy, self._img_h - 1)))
+
+    def paintEvent(self, _e):
+        p = QPainter(self)
+        p.fillRect(self.rect(), QColor("#1e1e1e"))
+        scale, ox, oy, dw, dh = self._layout()
+        target = QRect(int(ox), int(oy), int(dw), int(dh))
+        p.drawPixmap(target, self._pix)
+
+        # exclude — красная штриховка
+        for rect in self._excludes:
+            dr = self._img_to_disp_rect(rect)
+            p.fillRect(dr, QColor(255, 60, 60, 90))
+            p.setPen(QPen(QColor("#ff5555"), 2, Qt.DashLine))
+            p.drawRect(dr)
+
+        # compare — зелёная рамка
+        dr = self._img_to_disp_rect(self._compare)
+        p.fillRect(dr, QColor(0, 200, 80, 35))
+        p.setPen(QPen(QColor("#00e676"), 2))
+        p.drawRect(dr)
+
+        # rubber band while dragging
+        if not self._rubber.isNull() and self._mode in ("compare", "exclude"):
+            p.setPen(QPen(QColor("#00c8ff"), 2, Qt.DashLine))
+            p.drawRect(self._rubber)
+
+        # click — синий крест
+        cp = self._img_to_disp_point(self._click)
+        arm = 10
+        p.setPen(QPen(QColor("#42a5f5"), 2))
+        p.drawLine(cp.x() - arm, cp.y(), cp.x() + arm, cp.y())
+        p.drawLine(cp.x(), cp.y() - arm, cp.x(), cp.y() + arm)
+        p.setBrush(QColor("#42a5f5"))
+        p.drawEllipse(cp, 4, 4)
+
+    def mousePressEvent(self, e):
+        if e.button() != Qt.LeftButton:
+            return
+        if self._mode == "click":
+            pt = self._disp_to_img(e.pos())
+            if pt is not None:
+                self._click = pt
+                self.update()
+            return
+        self._origin = e.pos()
+        self._rubber = QRect(self._origin, self._origin)
+
+    def mouseMoveEvent(self, e):
+        if self._origin is not None and self._mode in ("compare", "exclude"):
+            self._rubber = QRect(self._origin, e.pos()).normalized()
+            self.update()
+
+    def mouseReleaseEvent(self, e):
+        if e.button() != Qt.LeftButton or self._origin is None:
+            return
+        if self._mode not in ("compare", "exclude"):
+            return
+        p1 = self._disp_to_img(self._origin)
+        p2 = self._disp_to_img(e.pos())
+        self._origin = None
+        self._rubber = QRect()
+        if p1 is None or p2 is None:
+            self.update()
+            return
+        x1, y1 = min(p1.x(), p2.x()), min(p1.y(), p2.y())
+        x2, y2 = max(p1.x(), p2.x()), max(p1.y(), p2.y())
+        if x2 - x1 < 3 or y2 - y1 < 3:
+            self.update()
+            return
+        rect = QRect(x1, y1, x2 - x1, y2 - y1)
+        if self._mode == "compare":
+            self._compare = rect
+        else:
+            self._excludes.append(rect)
+        self.update()
+
+
+class TemplateEditorDialog(QDialog):
+    """После захвата: задать compare / exclude / click для шаблона."""
+
+    def __init__(self, image_path, parent=None):
+        super().__init__(parent)
+        self._path = image_path
+        self.setWindowTitle("Template regions — compare / exclude / click")
+        self.setMinimumSize(720, 520)
+
+        root = QVBoxLayout(self)
+        hint = QLabel(
+            "<b>Green</b> = area used to find this on screen. "
+            "<b>Red</b> = ignored (e.g. changing numbers). "
+            "<b>Blue cross</b> = where to click."
+        )
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        modes = QHBoxLayout()
+        self._btn_compare = QPushButton("1. Compare (match)")
+        self._btn_exclude = QPushButton("2. Exclude (ignore)")
+        self._btn_click = QPushButton("3. Click point")
+        for btn, mode in ((self._btn_compare, "compare"),
+                          (self._btn_exclude, "exclude"),
+                          (self._btn_click, "click")):
+            btn.setCheckable(True)
+            btn.clicked.connect(lambda checked, m=mode: self._set_mode(m))
+            modes.addWidget(btn)
+        root.addLayout(modes)
+
+        self._canvas = TemplateEditorCanvas(image_path)
+        meta = load_template_meta(image_path)
+        if meta:
+            self._canvas.load_meta(meta)
+        root.addWidget(self._canvas, stretch=1)
+
+        help_l = QLabel(
+            "Compare: drag a rectangle. Exclude: drag one or more rectangles "
+            "over changing fields. Click: single-click the button/target."
+        )
+        help_l.setStyleSheet("color:#aaa; font-size:11px;")
+        help_l.setWordWrap(True)
+        root.addWidget(help_l)
+
+        tools = QHBoxLayout()
+        btn_full = QPushButton("Reset compare → full image")
+        btn_full.clicked.connect(self._canvas.reset_compare_full)
+        tools.addWidget(btn_full)
+        btn_undo = QPushButton("Remove last exclude")
+        btn_undo.clicked.connect(self._canvas.remove_last_exclude)
+        tools.addWidget(btn_undo)
+        btn_clear = QPushButton("Clear all excludes")
+        btn_clear.clicked.connect(self._canvas.clear_excludes)
+        tools.addWidget(btn_clear)
+        tools.addStretch()
+        root.addLayout(tools)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        ok = QPushButton("OK")
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(ok)
+        btns.addWidget(cancel)
+        root.addLayout(btns)
+
+        self._set_mode("compare")
+
+    def _set_mode(self, mode):
+        self._canvas.set_mode(mode)
+        self._btn_compare.setChecked(mode == "compare")
+        self._btn_exclude.setChecked(mode == "exclude")
+        self._btn_click.setChecked(mode == "click")
+
+    def save_meta(self):
+        save_template_meta(self._path, self._canvas.get_meta())
+
+
+# ============================================================================
 # ПРЕВЬЮ ШАБЛОНА (миниатюра в строке + просмотр в полном размере)
 # ============================================================================
 
@@ -804,8 +1125,10 @@ class ThumbLabel(QLabel):
 class ImagePreviewDialog(QDialog):
     """Просмотр шаблона в полном размере (с прокруткой для больших картинок)."""
 
-    def __init__(self, path, parent=None):
+    def __init__(self, path, parent=None, on_edit=None):
         super().__init__(parent)
+        self._path = path
+        self._on_edit = on_edit
         self.setWindowTitle(f"Preview — {os.path.basename(path)}")
         lay = QVBoxLayout(self)
 
@@ -815,33 +1138,89 @@ class ImagePreviewDialog(QDialog):
         info.setWordWrap(True)
         lay.addWidget(info)
 
-        img_label = QLabel()
-        img_label.setAlignment(Qt.AlignCenter)
+        meta = load_template_meta(path)
+        if meta:
+            c = meta.get("compare_rect", [])
+            n_ex = len(meta.get("exclude_rects") or [])
+            ck = meta.get("click_point", [])
+            meta_lbl = QLabel(
+                f"Compare: {c}  |  Excludes: {n_ex}  |  Click: {ck}"
+            )
+            meta_lbl.setStyleSheet("color:#8bc; font-size:11px;")
+            lay.addWidget(meta_lbl)
+
+        self._img_label = QLabel()
+        self._img_label.setAlignment(Qt.AlignCenter)
         pix = QPixmap(path)
 
         w, h = 640, 480
         if pix.isNull():
-            img_label.setText("Cannot load image.")
+            self._img_label.setText("Cannot load image.")
         else:
             scr = QApplication.primaryScreen().availableGeometry()
             maxw, maxh = int(scr.width() * 0.85), int(scr.height() * 0.8)
             shown = pix
             if pix.width() > maxw or pix.height() > maxh:
                 shown = pix.scaled(maxw, maxh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            img_label.setPixmap(shown)
+            self._img_label.setPixmap(self._draw_overlays(shown, pix, meta))
             w = min(shown.width() + 40, maxw)
             h = min(shown.height() + 90, maxh)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setWidget(img_label)
+        scroll.setWidget(self._img_label)
         lay.addWidget(scroll)
 
+        btns = QHBoxLayout()
+        if on_edit and os.path.isfile(path):
+            btn_edit = QPushButton("Edit regions…")
+            btn_edit.clicked.connect(self._edit_regions)
+            btns.addWidget(btn_edit)
+        btns.addStretch()
         btn = QPushButton("Close")
         btn.clicked.connect(self.accept)
-        lay.addWidget(btn, alignment=Qt.AlignRight)
+        btns.addWidget(btn)
+        lay.addLayout(btns)
 
         self.resize(max(w, 360), max(h, 240))
+
+    def _draw_overlays(self, shown, original, meta):
+        if meta is None or shown.isNull():
+            return shown
+        out = shown.copy()
+        sx = shown.width() / max(original.width(), 1)
+        sy = shown.height() / max(original.height(), 1)
+        p = QPainter(out)
+        for r in meta.get("exclude_rects") or []:
+            if len(r) == 4:
+                x, y, w, h = r
+                p.fillRect(int(x * sx), int(y * sy), int(w * sx), int(h * sy),
+                           QColor(255, 60, 60, 90))
+        c = meta.get("compare_rect")
+        if c and len(c) == 4:
+            x, y, w, h = c
+            p.setPen(QPen(QColor("#00e676"), 2))
+            p.drawRect(int(x * sx), int(y * sy), int(w * sx), int(h * sy))
+        ck = meta.get("click_point")
+        if ck and len(ck) == 2:
+            cx, cy = int(ck[0] * sx), int(ck[1] * sy)
+            p.setPen(QPen(QColor("#42a5f5"), 2))
+            p.drawLine(cx - 8, cy, cx + 8, cy)
+            p.drawLine(cx, cy - 8, cx, cy + 8)
+        p.end()
+        return out
+
+    def _edit_regions(self):
+        if self._on_edit and self._on_edit(self._path):
+            meta = load_template_meta(self._path)
+            pix = QPixmap(self._path)
+            if not pix.isNull():
+                scr = QApplication.primaryScreen().availableGeometry()
+                maxw, maxh = int(scr.width() * 0.85), int(scr.height() * 0.8)
+                shown = pix
+                if pix.width() > maxw or pix.height() > maxh:
+                    shown = pix.scaled(maxw, maxh, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+                self._img_label.setPixmap(self._draw_overlays(shown, pix, meta))
 
 
 # ============================================================================
@@ -874,6 +1253,10 @@ class MainWindow(QMainWindow):
         self.btn_down  = QPushButton("↓")
         self.btn_snip  = QPushButton("📷 Capture")
         self.btn_snip.setToolTip("Capture a screen region for the selected step (Ctrl+Shift+S)")
+        self.btn_regions = QPushButton("✏ Regions")
+        self.btn_regions.setToolTip(
+            "Edit compare / exclude / click regions for the selected step's template"
+        )
         self.btn_save  = QPushButton("💾 Save")
         self.btn_load  = QPushButton("📂 Load")
         self.btn_stop.setEnabled(False)
@@ -887,6 +1270,7 @@ class MainWindow(QMainWindow):
         top.addWidget(self.btn_down)
         top.addSpacing(20)
         top.addWidget(self.btn_snip)
+        top.addWidget(self.btn_regions)
         top.addStretch()
         top.addWidget(QLabel("Start delay, s:"))
         self.spin_delay = QDoubleSpinBox()
@@ -964,6 +1348,7 @@ class MainWindow(QMainWindow):
         self.btn_save.clicked.connect(self.save_scenario)
         self.btn_load.clicked.connect(self.load_scenario)
         self.btn_snip.clicked.connect(self.capture_region)
+        self.btn_regions.clicked.connect(self.edit_template_regions)
 
         # горячая клавиша для захвата области
         QShortcut(QKeySequence("Ctrl+Shift+S"), self, activated=self.capture_region)
@@ -1065,8 +1450,37 @@ class MainWindow(QMainWindow):
         if not path or not os.path.isfile(path):
             self._log("No image to preview for this step.", "skip")
             return
-        dlg = ImagePreviewDialog(path, self)
+        dlg = ImagePreviewDialog(path, self, on_edit=self._open_template_editor)
         dlg.exec()
+
+    def _open_template_editor(self, path):
+        """Открыть редактор compare/exclude/click. True если сохранено."""
+        if not path or not os.path.isfile(path):
+            return False
+        dlg = TemplateEditorDialog(path, self)
+        if dlg.exec() == QDialog.Accepted:
+            dlg.save_meta()
+            self._log(f"Template regions saved: {os.path.basename(path)}", "ok")
+            return True
+        return False
+
+    def edit_template_regions(self):
+        row = self.table.currentRow()
+        if row < 0:
+            self._log("Select a step first.", "err")
+            return
+        action = self.table.cellWidget(row, COL_ACTION).currentData()
+        if action not in TEMPLATE_ACTIONS:
+            self._log("Regions apply only to template steps (click/wait on template).", "err")
+            return
+        path = self.table.cellWidget(row, COL_IMAGE).text().strip()
+        if not path or not os.path.isfile(path):
+            self._log("Capture or browse a template image for this step first.", "err")
+            return
+        self._open_template_editor(path)
+        img_field = self.table.cellWidget(row, COL_IMAGE)
+        if img_field:
+            img_field.setText(img_field.text())
 
     # ---------- захват области экрана ----------
 
@@ -1147,6 +1561,13 @@ class MainWindow(QMainWindow):
             img.crop((lx, ly, lx + lw, ly + lh)).save(path)
             img_field.setText(path)
             self._log(f"Captured template → {path} (step {row + 1})", "ok")
+            if action in TEMPLATE_ACTIONS:
+                save_template_meta(path, default_template_meta(lw, lh))
+                self.table.setCurrentCell(row, 0)
+                if self._open_template_editor(path):
+                    img_field.setText(path)
+                else:
+                    self._log("Regions: using full image + center click (edit later with ✏ Regions).", "info")
 
     def del_step(self):
         r = self.table.currentRow()
