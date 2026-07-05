@@ -50,7 +50,8 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QTableWidget, QTableWidgetItem, QPushButton, QComboBox, QCheckBox,
     QLineEdit, QLabel, QTextEdit, QFileDialog, QSpinBox, QHeaderView,
-    QDoubleSpinBox, QSplitter, QDialog, QScrollArea
+    QDoubleSpinBox, QSplitter, QDialog, QScrollArea, QAbstractItemView,
+    QStyle, QStyleOptionButton, QStyleOptionHeader,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QRect, QPoint
 from PySide6.QtGui import QColor, QImage, QPixmap, QPainter, QPen, QShortcut, QKeySequence
@@ -131,6 +132,7 @@ def default_template_meta(w, h):
         "compare_rect": [0, 0, w, h],
         "exclude_rects": [],
         "click_point": [w // 2, h // 2],
+        "scroll_bar_rect": None,
     }
 
 
@@ -157,6 +159,7 @@ def _build_compare_mask(compare_rect, exclude_rects):
 
 
 TEMPLATE_ACTIONS = frozenset({"click_image", "double_click_image", "wait_image"})
+REGION_EDIT_ACTIONS = TEMPLATE_ACTIONS | {"scroll"}
 
 
 def _parse_xy(text):
@@ -389,15 +392,15 @@ class Runner(QThread):
             target = st["image"].strip()
             if not target:
                 raise RuntimeError(
-                    "Scroll needs a point inside the scrollable panel in Template/area "
-                    "(x,y) — capture it with 📷 or type coordinates."
+                    "Scroll needs a template PNG in Template/area — capture a large "
+                    "area with 📷, then mark compare / exclude / scroll bar regions."
                 )
             if _is_xy(target):
                 x, y = _parse_xy(target)
             elif os.path.isfile(target):
                 x, y = self._locate(target, to, find)
             else:
-                raise RuntimeError(f"scroll target not found: {target}")
+                raise RuntimeError(f"scroll template not found: {target}")
             clicks, direction, amount = parse_scroll_value(val)
             perform_mouse_scroll(x, y, clicks)
             self.log.emit(
@@ -911,10 +914,11 @@ class SnipOverlay(QWidget):
 # ============================================================================
 
 class TemplateEditorCanvas(QWidget):
-    """Рисуем на захваченном шаблоне: compare, exclude, click."""
+    """Рисуем на захваченном шаблоне: compare, exclude, click / scroll bar."""
 
-    def __init__(self, image_path):
+    def __init__(self, image_path, purpose="template"):
         super().__init__()
+        self._purpose = purpose
         self._pix = QPixmap(image_path)
         self._img_w = max(self._pix.width(), 1)
         self._img_h = max(self._pix.height(), 1)
@@ -922,6 +926,7 @@ class TemplateEditorCanvas(QWidget):
         self._compare = QRect(0, 0, self._img_w, self._img_h)
         self._excludes = []
         self._click = QPoint(self._img_w // 2, self._img_h // 2)
+        self._scroll_bar = None
         self._origin = None
         self._rubber = QRect()
         self.setMinimumSize(480, 320)
@@ -946,15 +951,28 @@ class TemplateEditorCanvas(QWidget):
         px, py = meta.get("click_point", [self._img_w // 2, self._img_h // 2])
         self._click = QPoint(max(0, min(int(px), self._img_w - 1)),
                              max(0, min(int(py), self._img_h - 1)))
+        sb = meta.get("scroll_bar_rect")
+        if sb and len(sb) == 4:
+            x, y, w, h = _clamp_rect(*sb, self._img_w, self._img_h)
+            self._scroll_bar = QRect(x, y, w, h)
+            self._click = QPoint(x + w // 2, y + h // 2)
+        else:
+            self._scroll_bar = None
         self.update()
 
     def get_meta(self):
         c = self._compare
-        return {
+        meta = {
             "compare_rect": [c.x(), c.y(), c.width(), c.height()],
             "exclude_rects": [[r.x(), r.y(), r.width(), r.height()] for r in self._excludes],
             "click_point": [self._click.x(), self._click.y()],
         }
+        if self._scroll_bar is not None and not self._scroll_bar.isNull():
+            r = self._scroll_bar
+            meta["scroll_bar_rect"] = [r.x(), r.y(), r.width(), r.height()]
+        else:
+            meta["scroll_bar_rect"] = None
+        return meta
 
     def reset_compare_full(self):
         self._compare = QRect(0, 0, self._img_w, self._img_h)
@@ -1018,11 +1036,19 @@ class TemplateEditorCanvas(QWidget):
         p.drawRect(dr)
 
         # rubber band while dragging
-        if not self._rubber.isNull() and self._mode in ("compare", "exclude"):
-            p.setPen(QPen(QColor("#00c8ff"), 2, Qt.DashLine))
+        if not self._rubber.isNull() and self._mode in ("compare", "exclude", "scroll"):
+            color = "#ff9800" if self._mode == "scroll" else "#00c8ff"
+            p.setPen(QPen(QColor(color), 2, Qt.DashLine))
             p.drawRect(self._rubber)
 
-        # click — синий крест
+        # scroll bar area — оранжевая рамка
+        if self._scroll_bar is not None and not self._scroll_bar.isNull():
+            dr = self._img_to_disp_rect(self._scroll_bar)
+            p.fillRect(dr, QColor(255, 152, 0, 60))
+            p.setPen(QPen(QColor("#ff9800"), 2))
+            p.drawRect(dr)
+
+        # click / wheel point — синий крест
         cp = self._img_to_disp_point(self._click)
         arm = 10
         p.setPen(QPen(QColor("#42a5f5"), 2))
@@ -1038,20 +1064,21 @@ class TemplateEditorCanvas(QWidget):
             pt = self._disp_to_img(e.pos())
             if pt is not None:
                 self._click = pt
+                self._scroll_bar = None
                 self.update()
             return
         self._origin = e.pos()
         self._rubber = QRect(self._origin, self._origin)
 
     def mouseMoveEvent(self, e):
-        if self._origin is not None and self._mode in ("compare", "exclude"):
+        if self._origin is not None and self._mode in ("compare", "exclude", "scroll"):
             self._rubber = QRect(self._origin, e.pos()).normalized()
             self.update()
 
     def mouseReleaseEvent(self, e):
         if e.button() != Qt.LeftButton or self._origin is None:
             return
-        if self._mode not in ("compare", "exclude"):
+        if self._mode not in ("compare", "exclude", "scroll"):
             return
         p1 = self._disp_to_img(self._origin)
         p2 = self._disp_to_img(e.pos())
@@ -1062,57 +1089,91 @@ class TemplateEditorCanvas(QWidget):
             return
         x1, y1 = min(p1.x(), p2.x()), min(p1.y(), p2.y())
         x2, y2 = max(p1.x(), p2.x()), max(p1.y(), p2.y())
-        if x2 - x1 < 3 or y2 - y1 < 3:
+        if x2 - x1 < 3 and y2 - y1 < 3:
+            if self._mode == "scroll":
+                pt = self._disp_to_img(e.pos())
+                if pt is not None:
+                    self._click = pt
+                    self._scroll_bar = None
             self.update()
             return
         rect = QRect(x1, y1, x2 - x1, y2 - y1)
         if self._mode == "compare":
             self._compare = rect
+        elif self._mode == "scroll":
+            self._scroll_bar = rect
+            self._click = QPoint(rect.x() + rect.width() // 2,
+                                 rect.y() + rect.height() // 2)
         else:
             self._excludes.append(rect)
         self.update()
 
 
 class TemplateEditorDialog(QDialog):
-    """После захвата: задать compare / exclude / click для шаблона."""
+    """После захвата: задать compare / exclude / click или scroll bar."""
 
-    def __init__(self, image_path, parent=None):
+    def __init__(self, image_path, parent=None, purpose="template"):
         super().__init__(parent)
         self._path = image_path
-        self.setWindowTitle("Template regions — compare / exclude / click")
+        self._purpose = purpose
+        is_scroll = purpose == "scroll"
+        self.setWindowTitle(
+            "Scroll regions — compare / exclude / scroll bar" if is_scroll
+            else "Template regions — compare / exclude / click"
+        )
         self.setMinimumSize(720, 520)
 
         root = QVBoxLayout(self)
-        hint = QLabel(
-            "<b>Green</b> = area used to find this on screen. "
-            "<b>Red</b> = ignored (e.g. changing numbers). "
-            "<b>Blue cross</b> = where to click."
-        )
+        if is_scroll:
+            hint = QLabel(
+                "<b>Green</b> = stable area to find this panel on screen. "
+                "<b>Red</b> = ignored (changing content). "
+                "<b>Orange</b> = scroll bar / wheel target (drag over the scrollbar)."
+            )
+        else:
+            hint = QLabel(
+                "<b>Green</b> = area used to find this on screen. "
+                "<b>Red</b> = ignored (e.g. changing numbers). "
+                "<b>Blue cross</b> = where to click."
+            )
         hint.setWordWrap(True)
         root.addWidget(hint)
 
         modes = QHBoxLayout()
         self._btn_compare = QPushButton("1. Compare (match)")
         self._btn_exclude = QPushButton("2. Exclude (ignore)")
-        self._btn_click = QPushButton("3. Click point")
-        for btn, mode in ((self._btn_compare, "compare"),
-                          (self._btn_exclude, "exclude"),
-                          (self._btn_click, "click")):
+        self._btn_click = QPushButton(
+            "3. Scroll bar" if is_scroll else "3. Click point"
+        )
+        mode_map = (
+            (self._btn_compare, "compare"),
+            (self._btn_exclude, "exclude"),
+            (self._btn_click, "scroll" if is_scroll else "click"),
+        )
+        for btn, mode in mode_map:
             btn.setCheckable(True)
             btn.clicked.connect(lambda checked, m=mode: self._set_mode(m))
             modes.addWidget(btn)
         root.addLayout(modes)
 
-        self._canvas = TemplateEditorCanvas(image_path)
+        self._canvas = TemplateEditorCanvas(image_path, purpose=purpose)
         meta = load_template_meta(image_path)
         if meta:
             self._canvas.load_meta(meta)
         root.addWidget(self._canvas, stretch=1)
 
-        help_l = QLabel(
-            "Compare: drag a rectangle. Exclude: drag one or more rectangles "
-            "over changing fields. Click: single-click the button/target."
-        )
+        if is_scroll:
+            help_text = (
+                "Capture a large area, then: Compare = unique stable frame around the list. "
+                "Exclude = changing list items/numbers. Scroll bar = drag a rectangle over "
+                "the vertical scrollbar (wheel events go to its center)."
+            )
+        else:
+            help_text = (
+                "Compare: drag a rectangle. Exclude: drag one or more rectangles "
+                "over changing fields. Click: single-click the button/target."
+            )
+        help_l = QLabel(help_text)
         help_l.setStyleSheet("color:#aaa; font-size:11px;")
         help_l.setWordWrap(True)
         root.addWidget(help_l)
@@ -1146,7 +1207,7 @@ class TemplateEditorDialog(QDialog):
         self._canvas.set_mode(mode)
         self._btn_compare.setChecked(mode == "compare")
         self._btn_exclude.setChecked(mode == "exclude")
-        self._btn_click.setChecked(mode == "click")
+        self._btn_click.setChecked(mode in ("click", "scroll"))
 
     def save_meta(self):
         save_template_meta(self._path, self._canvas.get_meta())
@@ -1235,9 +1296,11 @@ class ImagePreviewDialog(QDialog):
             c = meta.get("compare_rect", [])
             n_ex = len(meta.get("exclude_rects") or [])
             ck = meta.get("click_point", [])
-            meta_lbl = QLabel(
-                f"Compare: {c}  |  Excludes: {n_ex}  |  Click: {ck}"
-            )
+            sb = meta.get("scroll_bar_rect")
+            parts = [f"Compare: {c}", f"Excludes: {n_ex}", f"Wheel: {ck}"]
+            if sb:
+                parts.append(f"Scroll bar: {sb}")
+            meta_lbl = QLabel("  |  ".join(parts))
             meta_lbl.setStyleSheet("color:#8bc; font-size:11px;")
             lay.addWidget(meta_lbl)
 
@@ -1293,6 +1356,13 @@ class ImagePreviewDialog(QDialog):
             x, y, w, h = c
             p.setPen(QPen(QColor("#00e676"), 2))
             p.drawRect(int(x * sx), int(y * sy), int(w * sx), int(h * sy))
+        sb = meta.get("scroll_bar_rect")
+        if sb and len(sb) == 4:
+            x, y, w, h = sb
+            p.fillRect(int(x * sx), int(y * sy), int(w * sx), int(h * sy),
+                       QColor(255, 152, 0, 70))
+            p.setPen(QPen(QColor("#ff9800"), 2))
+            p.drawRect(int(x * sx), int(y * sy), int(w * sx), int(h * sy))
         ck = meta.get("click_point")
         if ck and len(ck) == 2:
             cx, cy = int(ck[0] * sx), int(ck[1] * sy)
@@ -1316,6 +1386,69 @@ class ImagePreviewDialog(QDialog):
 
 
 # ============================================================================
+# ЗАГОЛОВОК ТАБЛИЦЫ С МАСТЕР-ЧЕКБОКСАМИ
+# ============================================================================
+
+class MasterCheckboxHeader(QHeaderView):
+    """Чекбокс в заголовке колонки — включить/выключить все строки сразу."""
+
+    masterToggled = Signal(int, bool)
+
+    def __init__(self, checkbox_cols, parent=None):
+        super().__init__(Qt.Horizontal, parent)
+        self._checkbox_cols = set(checkbox_cols)
+        self._states = {COL_ON: True, COL_FIND: False, COL_STOP: True}
+
+    def setMasterState(self, col, checked):
+        if col in self._checkbox_cols:
+            self._states[col] = checked
+            self.viewport().update()
+
+    def _section_rect(self, logical_index):
+        return QRect(
+            self.sectionViewportPosition(logical_index), 0,
+            self.sectionSize(logical_index), self.height(),
+        )
+
+    @staticmethod
+    def _checkbox_rect(section_rect):
+        box = 18
+        return QRect(
+            section_rect.x() + (section_rect.width() - box) // 2,
+            section_rect.y() + (section_rect.height() - box) // 2,
+            box, box,
+        )
+
+    def paintSection(self, painter, rect, logical_index):
+        painter.save()
+        opt = QStyleOptionHeader()
+        self.initStyleOption(opt)
+        opt.rect = rect
+        opt.section = logical_index
+        if logical_index in self._checkbox_cols:
+            opt.text = ""
+        self.style().drawControl(QStyle.CE_Header, opt, painter, self)
+        if logical_index in self._checkbox_cols:
+            cb_opt = QStyleOptionButton()
+            cb_opt.rect = self._checkbox_rect(rect)
+            cb_opt.state = QStyle.State_Enabled
+            cb_opt.state |= QStyle.State_On if self._states[logical_index] else QStyle.State_Off
+            self.style().drawControl(QStyle.CE_CheckBox, cb_opt, painter)
+        painter.restore()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            pos = event.pos()
+            for col in self._checkbox_cols:
+                if self._checkbox_rect(self._section_rect(col)).contains(pos):
+                    self._states[col] = not self._states[col]
+                    self.masterToggled.emit(col, self._states[col])
+                    self.viewport().update()
+                    return
+        super().mousePressEvent(event)
+
+
+# ============================================================================
 # ГЛАВНОЕ ОКНО
 # ============================================================================
 
@@ -1330,6 +1463,7 @@ class MainWindow(QMainWindow):
         self.resize(w, h)
         self.move(scr.x() + (scr.width() - w) // 2, scr.y() + (scr.height() - h) // 2)
         self.runner = None
+        self._clipboard = []
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1339,7 +1473,14 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout()
         self.btn_run   = QPushButton("▶ Run")
         self.btn_stop  = QPushButton("⏹ Stop")
-        self.btn_add   = QPushButton("➕ Step")
+        self.btn_add   = QPushButton("➕ Add")
+        self.btn_add.setToolTip("Add a new step at the end of the list")
+        self.btn_insert = QPushButton("➕ Insert")
+        self.btn_insert.setToolTip("Insert a new step after the selected row")
+        self.btn_copy  = QPushButton("📋 Copy")
+        self.btn_copy.setToolTip("Copy selected step(s)")
+        self.btn_paste = QPushButton("📋 Paste")
+        self.btn_paste.setToolTip("Paste copied step(s) after the selected row")
         self.btn_del   = QPushButton("🗑 Delete")
         self.btn_up    = QPushButton("↑")
         self.btn_down  = QPushButton("↓")
@@ -1347,7 +1488,7 @@ class MainWindow(QMainWindow):
         self.btn_snip.setToolTip("Capture a screen region for the selected step (Ctrl+Shift+S)")
         self.btn_regions = QPushButton("✏ Regions")
         self.btn_regions.setToolTip(
-            "Edit compare / exclude / click regions for the selected step's template"
+            "Edit compare / exclude / click or scroll-bar regions for the selected step"
         )
         self.btn_save  = QPushButton("💾 Save")
         self.btn_load  = QPushButton("📂 Load")
@@ -1357,6 +1498,9 @@ class MainWindow(QMainWindow):
         top.addWidget(self.btn_stop)
         top.addSpacing(20)
         top.addWidget(self.btn_add)
+        top.addWidget(self.btn_insert)
+        top.addWidget(self.btn_copy)
+        top.addWidget(self.btn_paste)
         top.addWidget(self.btn_del)
         top.addWidget(self.btn_up)
         top.addWidget(self.btn_down)
@@ -1390,10 +1534,15 @@ class MainWindow(QMainWindow):
 
         # Таблица шагов
         self.table = QTableWidget(0, 9)
+        self._header = MasterCheckboxHeader([COL_ON, COL_FIND, COL_STOP], self.table)
+        self.table.setHorizontalHeader(self._header)
+        self._header.masterToggled.connect(self._master_toggle_column)
         self.table.setHorizontalHeaderLabels(
             ["On", "Action", "Template / area", "…", "Preview",
              "Value", "Timeout", "Find win", "Stop"]
         )
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         h = self.table.horizontalHeader()
         h.setSectionResizeMode(COL_IMAGE, QHeaderView.Stretch)
         self.table.setColumnWidth(COL_ON, 40)
@@ -1412,7 +1561,14 @@ class MainWindow(QMainWindow):
         self.table.verticalHeader().setDefaultSectionSize(48)
         self.table.horizontalHeaderItem(COL_FIND).setToolTip(
             "Search for the window/element: if the target isn't visible, cycle "
-            "through open windows (Alt+Tab style) to find it. Default off."
+            "through open windows (Alt+Tab style) to find it. Default off. "
+            "Header checkbox toggles ALL rows."
+        )
+        self.table.horizontalHeaderItem(COL_ON).setToolTip(
+            "Enable/disable step. Header checkbox toggles ALL rows."
+        )
+        self.table.horizontalHeaderItem(COL_STOP).setToolTip(
+            "Stop scenario on error. Header checkbox toggles ALL rows."
         )
         splitter.addWidget(self.table)
 
@@ -1432,6 +1588,9 @@ class MainWindow(QMainWindow):
 
         # --- Сигналы ---
         self.btn_add.clicked.connect(lambda: self.add_step())
+        self.btn_insert.clicked.connect(self.insert_step)
+        self.btn_copy.clicked.connect(self.copy_steps)
+        self.btn_paste.clicked.connect(self.paste_steps)
         self.btn_del.clicked.connect(self.del_step)
         self.btn_up.clicked.connect(lambda: self.move_step(-1))
         self.btn_down.clicked.connect(lambda: self.move_step(1))
@@ -1444,6 +1603,9 @@ class MainWindow(QMainWindow):
 
         # горячая клавиша для захвата области
         QShortcut(QKeySequence("Ctrl+Shift+S"), self, activated=self.capture_region)
+        QShortcut(QKeySequence("Ctrl+C"), self.table, activated=self.copy_steps)
+        QShortcut(QKeySequence("Ctrl+V"), self.table, activated=self.paste_steps)
+        QShortcut(QKeySequence("Insert"), self.table, activated=self.insert_step)
 
         if not AUTOMATION_OK:
             self._log(f"⚠ Automation libraries not found: {_IMPORT_ERR}", "err")
@@ -1457,12 +1619,69 @@ class MainWindow(QMainWindow):
 
     # ---------- работа с таблицей ----------
 
-    def add_step(self, data=None):
-        r = self.table.rowCount()
-        self.table.insertRow(r)
+    def _selected_rows(self):
+        return sorted({idx.row() for idx in self.table.selectedIndexes()})
 
+    def _master_toggle_column(self, col, checked):
+        for r in range(self.table.rowCount()):
+            cb = self._checkbox_at(r, col)
+            if cb:
+                cb.blockSignals(True)
+                cb.setChecked(checked)
+                cb.blockSignals(False)
+        self._header.setMasterState(col, checked)
+
+    def _sync_master_from_rows(self):
+        for col in (COL_ON, COL_FIND, COL_STOP):
+            if self.table.rowCount() == 0:
+                continue
+            vals = [self._checkbox_at(r, col).isChecked()
+                    for r in range(self.table.rowCount())
+                    if self._checkbox_at(r, col)]
+            if vals:
+                self._header.setMasterState(col, all(vals))
+
+    def add_step(self, data=None, insert_at=None):
+        if insert_at is None:
+            insert_at = self.table.rowCount()
+        else:
+            insert_at = max(0, min(int(insert_at), self.table.rowCount()))
+        self.table.insertRow(insert_at)
+        self._populate_row(insert_at, data)
+        self._sync_master_from_rows()
+
+    def insert_step(self):
+        rows = self._selected_rows()
+        insert_at = rows[-1] + 1 if rows else self.table.rowCount()
+        self.add_step(insert_at=insert_at)
+        self.table.clearSelection()
+        self.table.setCurrentCell(insert_at, COL_ACTION)
+        self._log(f"Inserted new step at row {insert_at + 1}.", "ok")
+
+    def copy_steps(self):
+        rows = self._selected_rows()
+        if not rows:
+            self._log("Select one or more steps to copy (Ctrl+click / Shift+click).", "err")
+            return
+        self._clipboard = [self._row_data(r) for r in rows]
+        self._log(f"Copied {len(rows)} step(s).", "ok")
+
+    def paste_steps(self):
+        if not self._clipboard:
+            self._log("Nothing copied yet — select steps and press Copy first.", "err")
+            return
+        rows = self._selected_rows()
+        insert_at = rows[-1] + 1 if rows else self.table.rowCount()
+        for i, data in enumerate(self._clipboard):
+            self.add_step(dict(data), insert_at=insert_at + i)
+        self.table.clearSelection()
+        self.table.setCurrentCell(insert_at, COL_ACTION)
+        self._log(f"Pasted {len(self._clipboard)} step(s) at row {insert_at + 1}.", "ok")
+
+    def _populate_row(self, r, data=None):
         chk_on = QCheckBox()
         chk_on.setChecked(True if not data else data.get("enabled", True))
+        chk_on.stateChanged.connect(self._sync_master_from_rows)
         self._center(chk_on, r, COL_ON)
 
         combo = QComboBox()
@@ -1478,11 +1697,9 @@ class MainWindow(QMainWindow):
         self.table.setCellWidget(r, COL_IMAGE, img)
 
         browse = QPushButton("…")
-        # захватываем сам QLineEdit, а не индекс строки (индекс "протухает" после удаления/перемещения)
         browse.clicked.connect(lambda _=False, edit=img: self._browse(edit))
         self.table.setCellWidget(r, COL_BROWSE, browse)
 
-        # миниатюра-превью шаблона (обновляется при смене пути, клик = полный размер)
         thumb = ThumbLabel()
         thumb.clicked.connect(lambda t=thumb: self._open_preview(t._path))
         img.textChanged.connect(lambda text, t=thumb: t.set_image(text))
@@ -1492,7 +1709,6 @@ class MainWindow(QMainWindow):
         val = QLineEdit(data.get("value", "") if data else "")
         self.table.setCellWidget(r, COL_VALUE, val)
 
-        # подсказку обновляем по ссылкам на виджеты, а не по индексу строки
         combo.currentIndexChanged.connect(
             lambda _=0, c=combo, v=val, im=img: self._update_hint(c, v, im)
         )
@@ -1505,10 +1721,12 @@ class MainWindow(QMainWindow):
         chk_find = QCheckBox()
         chk_find.setChecked(data.get("find_window", False) if data else False)
         chk_find.setToolTip("Search for the window/element (cycle windows if not visible)")
+        chk_find.stateChanged.connect(self._sync_master_from_rows)
         self._center(chk_find, r, COL_FIND)
 
         chk_stop = QCheckBox()
         chk_stop.setChecked(data.get("stop_on_error", True) if data else True)
+        chk_stop.stateChanged.connect(self._sync_master_from_rows)
         self._center(chk_stop, r, COL_STOP)
 
         self._update_hint(combo, val, img)
@@ -1532,7 +1750,7 @@ class MainWindow(QMainWindow):
         val.setPlaceholderText(VALUE_HINT.get(action, ""))
         if img is not None:
             if action == "scroll":
-                img.setPlaceholderText("x,y inside scrollable panel (capture or type)")
+                img.setPlaceholderText("template png — capture large area, then mark scroll bar")
             else:
                 img.setPlaceholderText("path to png (or x,y,w,h for OCR)")
 
@@ -1552,14 +1770,22 @@ class MainWindow(QMainWindow):
         dlg = ImagePreviewDialog(path, self, on_edit=self._open_template_editor)
         dlg.exec()
 
-    def _open_template_editor(self, path):
-        """Открыть редактор compare/exclude/click. True если сохранено."""
+    def _open_template_editor(self, path, purpose=None):
+        """Открыть редактор compare/exclude/click или scroll bar. True если сохранено."""
         if not path or not os.path.isfile(path):
             return False
-        dlg = TemplateEditorDialog(path, self)
+        if purpose is None:
+            row = self.table.currentRow()
+            if row >= 0:
+                action = self.table.cellWidget(row, COL_ACTION).currentData()
+                purpose = "scroll" if action == "scroll" else "template"
+            else:
+                purpose = "template"
+        dlg = TemplateEditorDialog(path, self, purpose=purpose)
         if dlg.exec() == QDialog.Accepted:
             dlg.save_meta()
-            self._log(f"Template regions saved: {os.path.basename(path)}", "ok")
+            label = "Scroll regions" if purpose == "scroll" else "Template regions"
+            self._log(f"{label} saved: {os.path.basename(path)}", "ok")
             return True
         return False
 
@@ -1569,14 +1795,15 @@ class MainWindow(QMainWindow):
             self._log("Select a step first.", "err")
             return
         action = self.table.cellWidget(row, COL_ACTION).currentData()
-        if action not in TEMPLATE_ACTIONS:
-            self._log("Regions apply only to template steps (click/wait on template).", "err")
+        if action not in REGION_EDIT_ACTIONS:
+            self._log("Regions apply to template or scroll steps only.", "err")
             return
         path = self.table.cellWidget(row, COL_IMAGE).text().strip()
         if not path or not os.path.isfile(path):
             self._log("Capture or browse a template image for this step first.", "err")
             return
-        self._open_template_editor(path)
+        purpose = "scroll" if action == "scroll" else "template"
+        self._open_template_editor(path, purpose=purpose)
         img_field = self.table.cellWidget(row, COL_IMAGE)
         if img_field:
             img_field.setText(img_field.text())
@@ -1651,9 +1878,17 @@ class MainWindow(QMainWindow):
             self._log(f"Captured point ({cx}, {cy}) → step {row + 1}", "ok")
 
         elif action == "scroll":
-            cx, cy = ax + lw // 2, ay + lh // 2
-            img_field.setText(f"{cx}, {cy}")
-            self._log(f"Captured scroll point ({cx}, {cy}) → step {row + 1}", "ok")
+            os.makedirs("templates", exist_ok=True)
+            path = os.path.join("templates", f"tpl_{int(time.time())}.png")
+            img.crop((lx, ly, lx + lw, ly + lh)).save(path)
+            img_field.setText(path)
+            self._log(f"Captured scroll template → {path} (step {row + 1})", "ok")
+            save_template_meta(path, default_template_meta(lw, lh))
+            self.table.setCurrentCell(row, 0)
+            if self._open_template_editor(path, purpose="scroll"):
+                img_field.setText(path)
+            else:
+                self._log("Mark compare / exclude / scroll bar with ✏ Regions.", "info")
 
         elif action in ("ocr_check", "verify_text"):
             img_field.setText(f"{ax}, {ay}, {lw}, {lh}")
@@ -1674,9 +1909,16 @@ class MainWindow(QMainWindow):
                     self._log("Regions: using full image + center click (edit later with ✏ Regions).", "info")
 
     def del_step(self):
-        r = self.table.currentRow()
-        if r >= 0:
+        rows = self._selected_rows()
+        if not rows:
+            r = self.table.currentRow()
+            if r >= 0:
+                rows = [r]
+        for r in reversed(rows):
             self.table.removeRow(r)
+        if rows:
+            self._log(f"Deleted {len(rows)} step(s).", "ok")
+        self._sync_master_from_rows()
 
     def move_step(self, direction):
         r = self.table.currentRow()
