@@ -48,7 +48,8 @@ folders that are numbered by an auto-incrementing serial number.
 
 - **OS:** Windows (uses per-monitor DPI awareness and `PyGetWindow` window
   control; the "Find window" feature is Windows-oriented).
-- **Python:** 3.10+ recommended.
+- **Python:** 3.14.6 recommended (offline bundles target this version; 3.10+ may
+  work for online install).
 - **Python packages:** see [`requirements.txt`](requirements.txt).
 - **Tesseract OCR engine** (only needed for *OCR check* / *Verify text* steps) —
   this is a native program, **not** a pip package.
@@ -57,19 +58,233 @@ folders that are numbered by an auto-incrementing serial number.
 
 ## Installation
 
-```bash
-# 1) (recommended) create & activate a virtual environment
-python -m venv venv
-venv\Scripts\activate            # Windows PowerShell / CMD
+### Option A — Online install (PC with internet)
 
-# 2) install Python dependencies
+**Automatic (recommended):** open **Command Prompt** in the project folder and run:
+
+```cmd
+python -m venv venv
+venv\Scripts\activate.bat
 pip install -r requirements.txt
 ```
 
+Or double-click `run_app.bat` after the venv is set up.
+
+**Manual equivalent:**
+
+```cmd
+cd path\to\Macs_VAC
+python -m venv venv
+venv\Scripts\activate.bat
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+venv\Scripts\python.exe MACS_Visual_Automation.py
+```
+
+---
+
+### Option B — Offline install (PC without internet)
+
+Use this when the target PC has **no internet**. Prepare everything on another
+PC that **does** have internet, then copy the whole project folder over.
+
+#### Step 1 — On a PC **with internet**
+
+Double-click or run:
+
+```cmd
+download_packages.bat
+```
+
+This downloads into the project folder:
+
+| Folder | Contents |
+| --- | --- |
+| `offline_installers\` | Python 3.14.6 installer + Tesseract OCR installer |
+| `offline_packages\` | All pip wheels needed by `requirements.txt` |
+
+#### Step 2 — Copy to the offline PC
+
+Copy the **entire project folder**, including at minimum:
+
+- `offline_installers\`
+- `offline_packages\`
+- `install_offline.bat`
+- `run_app.bat`
+- `MACS_Visual_Automation.py`
+- `requirements.txt`
+
+#### Step 3 — On the offline PC
+
+Double-click or run:
+
+```cmd
+install_offline.bat
+```
+
+This script automatically:
+
+1. Installs **Python 3.14.6** from `offline_installers\` (if Python is missing)
+2. Installs **Tesseract OCR** from the local installer (optional, for OCR steps)
+3. Creates `venv\` and installs all pip packages from `offline_packages\`
+
+Then start the app:
+
+```cmd
+run_app.bat
+```
+
+> **Important:** pip wheels in `offline_packages\` were built for **Python
+> 3.14.6**. The offline PC must use the same version. If you need a different
+> Python version, re-run `download_packages.bat` on a PC that has that version
+> installed.
+
+---
+
+### Option C — Manual offline install (if `.bat` files fail)
+
+Use these commands one by one in **Command Prompt** (`cmd.exe`). Prefer `cmd`
+over PowerShell for activation — it avoids script-policy issues.
+
+#### C.1 Allow PowerShell scripts (only if you use PowerShell)
+
+If `venv\Scripts\activate` fails with *"running scripts is disabled"* in
+PowerShell, run **once** (no admin needed):
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+
+Then activate with:
+
+```powershell
+venv\Scripts\activate
+```
+
+**Alternatives that skip PowerShell entirely:**
+
+```cmd
+venv\Scripts\activate.bat
+```
+
+Or call Python directly without activating:
+
+```cmd
+venv\Scripts\python.exe MACS_Visual_Automation.py
+```
+
+**One-time bypass** (current PowerShell window only, no permanent change):
+
+```powershell
+Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process
+venv\Scripts\activate
+```
+
+#### C.2 Install Python manually (offline PC)
+
+If `install_offline.bat` cannot install Python, run the local installer:
+
+```cmd
+cd path\to\Macs_VAC
+offline_installers\python-3.14.6-amd64.exe /quiet InstallAllUsers=0 PrependPath=1 Include_test=0 Include_pip=1
+```
+
+Verify (open a **new** Command Prompt after install):
+
+```cmd
+python --version
+```
+
+Expected output: `Python 3.14.6`
+
+If `python` is not found, use the full path:
+
+```cmd
+"%LOCALAPPDATA%\Programs\Python\Python314\python.exe" --version
+```
+
+#### C.3 Install pip packages manually (offline PC)
+
+```cmd
+cd path\to\Macs_VAC
+
+python -m venv venv
+venv\Scripts\activate.bat
+
+python -m pip install --no-index --find-links=offline_packages pip setuptools wheel
+python -m pip install --no-index --find-links=offline_packages -r requirements.txt
+```
+
+If activation fails, replace `python` with the full path:
+
+```cmd
+"%LOCALAPPDATA%\Programs\Python\Python314\python.exe" -m venv venv
+venv\Scripts\python.exe -m pip install --no-index --find-links=offline_packages pip setuptools wheel
+venv\Scripts\python.exe -m pip install --no-index --find-links=offline_packages -r requirements.txt
+```
+
+#### C.4 Install Tesseract manually (offline PC, OCR steps only)
+
+Silent install from the bundled installer:
+
+```cmd
+offline_installers\tesseract-ocr-w64-setup-5.5.0.20241111.exe /S
+```
+
+Or run the `.exe` interactively and install to the default folder
+`C:\Program Files\Tesseract-OCR\`.
+
+Verify:
+
+```cmd
+tesseract --version
+```
+
+#### C.5 Run the app manually
+
+```cmd
+cd path\to\Macs_VAC
+venv\Scripts\python.exe MACS_Visual_Automation.py
+```
+
+---
+
+### Download packages manually (if `download_packages.bat` fails)
+
+Run on a PC **with internet** and Python 3.14.6 installed:
+
+```cmd
+cd path\to\Macs_VAC
+mkdir offline_packages
+mkdir offline_installers
+
+curl -L -o offline_installers\python-3.14.6-amd64.exe https://www.python.org/ftp/python/3.14.6/python-3.14.6-amd64.exe
+
+curl -L -o offline_installers\tesseract-ocr-w64-setup-5.5.0.20241111.exe https://digi.bib.uni-mannheim.de/tesseract/tesseract-ocr-w64-setup-5.5.0.20241111.exe
+
+python -m venv venv
+venv\Scripts\activate.bat
+python -m pip install --upgrade pip
+pip download -r requirements.txt -d offline_packages
+pip download setuptools wheel pip build -d offline_packages
+```
+
+If your offline PC uses a **different Python version**, download wheels with that
+version (example for 3.12):
+
+```cmd
+py -3.12 -m pip download -r requirements.txt -d offline_packages
+py -3.12 -m pip download setuptools wheel pip build -d offline_packages
+```
+
+---
+
 ### Installing the Tesseract engine (for OCR steps)
 
-Download and install a Tesseract build (e.g. the **UB Mannheim** Windows build),
-then either:
+Tesseract is included in `offline_installers\` when you run
+`download_packages.bat`. For online install, download a Windows build from
+[UB Mannheim Tesseract](https://github.com/UB-Mannheim/tesseract/wiki), then
+either:
 
 - add its folder to your `PATH`, **or**
 - install it to the default location
@@ -86,8 +301,23 @@ still can't be found, set the path directly by editing `TESSERACT_PATH` /
 
 ## Running
 
-```bash
+**After install:**
+
+```cmd
+run_app.bat
+```
+
+**Or manually:**
+
+```cmd
+venv\Scripts\activate.bat
 python MACS_Visual_Automation.py
+```
+
+**Without activating venv:**
+
+```cmd
+venv\Scripts\python.exe MACS_Visual_Automation.py
 ```
 
 ---
@@ -198,10 +428,20 @@ Captured templates are stored under `templates\`, and proof/screenshots under
 
 ## Troubleshooting
 
+- **PowerShell: "running scripts is disabled"** — use `venv\Scripts\activate.bat`
+  in Command Prompt instead, or run
+  `Set-ExecutionPolicy RemoteSigned -Scope CurrentUser` (see
+  [Option C.1](#c1-allow-powershell-scripts-only-if-you-use-powershell) above).
 - **"Automation libraries are not installed"** — run
-  `pip install -r requirements.txt` (inside your venv).
-- **OCR steps fail / "Tesseract OCR engine not found"** — install the Tesseract
-  engine and add it to `PATH` (see above).
+  `pip install -r requirements.txt` (online) or `install_offline.bat` (offline).
+- **Offline pip install fails / "no matching distribution"** — Python version on
+  the offline PC must match the version used when `download_packages.bat` was
+  run (default: 3.14.6). Re-download wheels with the correct version.
+- **`download_packages.bat` fails to download Python** — download manually from
+  `https://www.python.org/ftp/python/3.14.6/python-3.14.6-amd64.exe` and save as
+  `offline_installers\python-3.14.6-amd64.exe`.
+- **OCR steps fail / "Tesseract OCR engine not found"** — install Tesseract from
+  `offline_installers\` or add it to `PATH` (see above).
 - **Template "not found on screen"** — the log prints the best match score and
   scale. Use `test_match.py` to debug a specific template:
 
@@ -222,6 +462,12 @@ Captured templates are stored under `templates\`, and proof/screenshots under
 - `MACS_Visual_Automation.py` — the application (GUI + automation engine).
 - `test_match.py` — standalone template-matching diagnostic tool.
 - `requirements.txt` — Python dependencies.
+- `download_packages.bat` — download Python, Tesseract, and pip wheels (online PC).
+- `install_offline.bat` — install everything from local folders (offline PC).
+- `run_app.bat` — start the app using the virtual environment.
+- `build.bat` / `MACS_Visual_Automation.spec` — build a standalone `.exe` with PyInstaller.
+- `offline_installers\` — Python and Tesseract installers (created by download script).
+- `offline_packages\` — pip wheels for offline install (created by download script).
 - `scenario.json`, `scenario1.json` — example saved scenarios.
 - `templates\` — captured template images (created on first capture).
 - `results\` — screenshots / PASS-FAIL proof output (created on first run).

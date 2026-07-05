@@ -16,6 +16,10 @@ results/
 templates/
 match_debug.png
 
+# --- Offline pip wheels (large; copy manually to other PCs) ---
+offline_packages/
+offline_installers/
+
 # --- IDE / OS ---
 .vscode/
 .idea/

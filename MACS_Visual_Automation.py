@@ -75,12 +75,19 @@ def _find_tesseract():
     in_path = shutil.which("tesseract")
     if in_path:
         return in_path
-    candidates = [
+    candidates = []
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(sys.executable)
+        candidates.extend([
+            os.path.join(exe_dir, "Tesseract-OCR", "tesseract.exe"),
+            os.path.join(exe_dir, "tesseract", "tesseract.exe"),
+        ])
+    candidates.extend([
         r"C:\Program Files\Tesseract-OCR\tesseract.exe",
         r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe"),
         os.path.expandvars(r"%LOCALAPPDATA%\Tesseract-OCR\tesseract.exe"),
-    ]
+    ])
     for c in candidates:
         if os.path.exists(c):
             return c
