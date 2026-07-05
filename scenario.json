@@ -1,0 +1,20 @@
+[
+  {
+    "enabled": true,
+    "action": "double_click_image",
+    "image": "templates\\tpl_1783251724.png",
+    "value": "down 5",
+    "timeout": 10,
+    "find_window": false,
+    "stop_on_error": true
+  },
+  {
+    "enabled": true,
+    "action": "scroll",
+    "image": "1200, 451",
+    "value": "down 50",
+    "timeout": 10,
+    "find_window": false,
+    "stop_on_error": true
+  }
+]

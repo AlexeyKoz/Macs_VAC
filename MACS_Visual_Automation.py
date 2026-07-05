@@ -159,6 +159,76 @@ def _build_compare_mask(compare_rect, exclude_rects):
 TEMPLATE_ACTIONS = frozenset({"click_image", "double_click_image", "wait_image"})
 
 
+def _parse_xy(text):
+    """Parse 'x, y' screen coordinates."""
+    parts = text.replace(" ", "").split(",")
+    if len(parts) < 2:
+        raise ValueError("expected x,y")
+    return int(parts[0]), int(parts[1])
+
+
+def _is_xy(text):
+    text = (text or "").strip()
+    if not text or os.path.isfile(text):
+        return False
+    try:
+        _parse_xy(text)
+        return True
+    except ValueError:
+        return False
+
+
+def parse_scroll_value(val):
+    """Return signed wheel clicks for pyautogui.scroll (positive=up, negative=down)."""
+    val = (val or "down, 3").strip().lower()
+    if not val:
+        val = "down, 3"
+    parts = [p.strip() for p in val.replace(" ", "").split(",") if p.strip()]
+    direction = "down"
+    amount = 3
+    if len(parts) == 1:
+        p = parts[0]
+        if p in ("down", "up"):
+            direction = p
+        elif p.lstrip("-").isdigit():
+            n = int(p)
+            direction, amount = ("up", abs(n)) if n < 0 else ("down", n)
+        elif p.startswith("down") and p[4:].isdigit():
+            direction, amount = "down", int(p[4:])
+        elif p.startswith("up") and p[2:].isdigit():
+            direction, amount = "up", int(p[2:])
+    elif len(parts) >= 2:
+        direction = parts[0] if parts[0] in ("down", "up") else "down"
+        amount = int(parts[1]) if parts[1].lstrip("-").isdigit() else 3
+    clicks = amount if direction == "up" else -amount
+    return clicks, direction, amount
+
+
+WHEEL_DELTA = 120   # Windows standard wheel notch size
+
+
+def perform_mouse_scroll(x, y, clicks):
+    """Scroll at screen position. clicks: +up / -down in wheel notches."""
+    notches = abs(int(clicks))
+    if notches == 0:
+        return
+    sign = 1 if clicks > 0 else -1
+
+    pyautogui.moveTo(x, y, duration=0.05)
+    time.sleep(0.08)
+    pyautogui.click(x, y)          # focus the scrollable panel
+    time.sleep(0.1)
+
+    if sys.platform == "win32":
+        # pyautogui.scroll passes dwData=clicks without × WHEEL_DELTA — too small to see.
+        user32 = ctypes.windll.user32
+        for _ in range(notches):
+            user32.mouse_event(0x0800, 0, 0, sign * WHEEL_DELTA, 0)  # MOUSEEVENTF_WHEEL
+            time.sleep(0.04)
+    else:
+        pyautogui.scroll(clicks, x=x, y=y)
+
+
 def grab_all():
     """Снимок ВСЕГО виртуального рабочего стола (все мониторы).
 
@@ -180,6 +250,7 @@ ACTIONS = {
     "click_xy":            "Click on coordinates (x,y)",
     "double_click_xy":     "Double-click on coordinates (x,y)",
     "wait_image":          "Wait for template to appear",
+    "scroll":              "Scroll panel (mouse wheel)",
     "key":                 "Press key",
     "type_text":           "Type text",
     "ui_delete":           "Delete on-screen item (Delete key)",
@@ -200,6 +271,7 @@ VALUE_HINT = {
     "click_xy":            "e.g. 450, 300",
     "double_click_xy":     "e.g. 450, 300",
     "wait_image":          "(not needed)",
+    "scroll":              "down, 5  or  up, 3  (wheel clicks)",
     "key":                 "e.g. enter / tab / f5",
     "type_text":           "text or file path",
     "ui_delete":           "empty, or 'enter' to confirm the dialog",
@@ -312,6 +384,26 @@ class Runner(QThread):
             x, y = [int(v) for v in val.replace(" ", "").split(",")]
             pyautogui.doubleClick(x, y)
             self.log.emit(f"[{i}] ✓ {label} @ ({x},{y})", "ok")
+
+        elif a == "scroll":
+            target = st["image"].strip()
+            if not target:
+                raise RuntimeError(
+                    "Scroll needs a point inside the scrollable panel in Template/area "
+                    "(x,y) — capture it with 📷 or type coordinates."
+                )
+            if _is_xy(target):
+                x, y = _parse_xy(target)
+            elif os.path.isfile(target):
+                x, y = self._locate(target, to, find)
+            else:
+                raise RuntimeError(f"scroll target not found: {target}")
+            clicks, direction, amount = parse_scroll_value(val)
+            perform_mouse_scroll(x, y, clicks)
+            self.log.emit(
+                f"[{i}] ✓ {label} {direction} ×{amount} @ ({x},{y})",
+                "ok",
+            )
 
         elif a == "key":
             pyautogui.press(val)
@@ -1401,7 +1493,9 @@ class MainWindow(QMainWindow):
         self.table.setCellWidget(r, COL_VALUE, val)
 
         # подсказку обновляем по ссылкам на виджеты, а не по индексу строки
-        combo.currentIndexChanged.connect(lambda _=0, c=combo, v=val: self._update_hint(c, v))
+        combo.currentIndexChanged.connect(
+            lambda _=0, c=combo, v=val, im=img: self._update_hint(c, v, im)
+        )
 
         to = QSpinBox()
         to.setRange(1, 600)
@@ -1417,7 +1511,7 @@ class MainWindow(QMainWindow):
         chk_stop.setChecked(data.get("stop_on_error", True) if data else True)
         self._center(chk_stop, r, COL_STOP)
 
-        self._update_hint(combo, val)
+        self._update_hint(combo, val, img)
 
     def _center(self, widget, row, col):
         wrap = QWidget()
@@ -1431,11 +1525,16 @@ class MainWindow(QMainWindow):
         wrap = self.table.cellWidget(row, col)
         return wrap.findChild(QCheckBox)
 
-    def _update_hint(self, combo, val):
+    def _update_hint(self, combo, val, img=None):
         if not combo or not val:
             return
         action = combo.currentData()
         val.setPlaceholderText(VALUE_HINT.get(action, ""))
+        if img is not None:
+            if action == "scroll":
+                img.setPlaceholderText("x,y inside scrollable panel (capture or type)")
+            else:
+                img.setPlaceholderText("path to png (or x,y,w,h for OCR)")
 
     def _browse(self, edit):
         path, _ = QFileDialog.getOpenFileName(
@@ -1550,6 +1649,11 @@ class MainWindow(QMainWindow):
             cx, cy = ax + lw // 2, ay + lh // 2
             val_field.setText(f"{cx}, {cy}")
             self._log(f"Captured point ({cx}, {cy}) → step {row + 1}", "ok")
+
+        elif action == "scroll":
+            cx, cy = ax + lw // 2, ay + lh // 2
+            img_field.setText(f"{cx}, {cy}")
+            self._log(f"Captured scroll point ({cx}, {cy}) → step {row + 1}", "ok")
 
         elif action in ("ocr_check", "verify_text"):
             img_field.setText(f"{ax}, {ay}, {lw}, {lh}")
