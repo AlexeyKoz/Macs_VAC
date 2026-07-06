@@ -159,7 +159,7 @@ def _build_compare_mask(compare_rect, exclude_rects):
 
 
 TEMPLATE_ACTIONS = frozenset({"click_image", "double_click_image", "wait_image"})
-REGION_EDIT_ACTIONS = TEMPLATE_ACTIONS | {"scroll"}
+REGION_EDIT_ACTIONS = TEMPLATE_ACTIONS | {"scroll", "fill_field"}
 
 
 def _parse_xy(text):
@@ -209,6 +209,84 @@ def parse_scroll_value(val):
 
 WHEEL_DELTA = 120   # Windows standard wheel notch size
 
+# Алиасы для press_key_spec (ctrl+a, backspace, …)
+KEY_ALIASES = {
+    "control": "ctrl", "ctl": "ctrl",
+    "command": "cmd", "win": "win", "windows": "win",
+    "del": "delete", "bksp": "backspace", "bs": "backspace",
+    "return": "enter", "esc": "escape",
+    "pgup": "pageup", "pgdn": "pagedown", "page_down": "pagedown", "page_up": "pageup",
+}
+
+
+def press_key_spec(spec):
+    """Одна клавиша или сочетание: enter, backspace, ctrl+a, ctrl+shift+s."""
+    spec = (spec or "").strip().lower()
+    if not spec:
+        raise ValueError("empty key")
+    if "+" in spec:
+        parts = [KEY_ALIASES.get(p.strip(), p.strip()) for p in spec.split("+") if p.strip()]
+        pyautogui.hotkey(*parts)
+    else:
+        pyautogui.press(KEY_ALIASES.get(spec, spec))
+
+
+def parse_fill_field_value(val):
+    """Разбор значения fill_field: [method:]text[|enter|tab]. method: clear|replace|paste."""
+    raw = (val or "").strip()
+    method = "clear"
+    confirm = None
+    if ":" in raw:
+        prefix, rest = raw.split(":", 1)
+        if prefix.lower() in ("clear", "replace", "paste"):
+            method = prefix.lower()
+            raw = rest.strip()
+    if "|" in raw:
+        raw, confirm = raw.rsplit("|", 1)
+        confirm = confirm.strip().lower() or None
+    return method, raw, confirm
+
+
+def fill_input_field(text, method="clear", confirm_key=None, click_xy=None):
+    """Клик в поле (опц.), очистка, ввод текста, подтверждение (опц.)."""
+    if click_xy is not None:
+        pyautogui.click(click_xy[0], click_xy[1])
+        time.sleep(0.2)
+
+    time.sleep(0.08)
+
+    if method == "paste":
+        import pyperclip
+        old_clip = None
+        try:
+            old_clip = pyperclip.paste()
+        except Exception:
+            pass
+        pyperclip.copy(text)
+        pyautogui.hotkey("ctrl", "a")
+        time.sleep(0.06)
+        pyautogui.hotkey("ctrl", "v")
+        time.sleep(0.06)
+        if old_clip is not None:
+            try:
+                pyperclip.copy(old_clip)
+            except Exception:
+                pass
+    elif method == "replace":
+        pyautogui.hotkey("ctrl", "a")
+        time.sleep(0.06)
+        pyautogui.write(text, interval=0.02)
+    else:
+        pyautogui.hotkey("ctrl", "a")
+        time.sleep(0.06)
+        pyautogui.press("backspace")
+        time.sleep(0.06)
+        pyautogui.write(text, interval=0.02)
+
+    if confirm_key:
+        time.sleep(0.08)
+        press_key_spec(confirm_key)
+
 
 def perform_mouse_scroll(x, y, clicks):
     """Scroll at screen position. clicks: +up / -down in wheel notches."""
@@ -254,8 +332,9 @@ ACTIONS = {
     "double_click_xy":     "Double-click on coordinates (x,y)",
     "wait_image":          "Wait for template to appear",
     "scroll":              "Scroll panel (mouse wheel)",
-    "key":                 "Press key",
+    "key":                 "Press key / shortcut",
     "type_text":           "Type text",
+    "fill_field":          "Fill input field (clear & type)",
     "ui_delete":           "Delete on-screen item (Delete key)",
     "ocr_check":           "OCR check (search for word)",
     "verify_text":         "Verify text & save proof (pass/fail)",
@@ -275,8 +354,9 @@ VALUE_HINT = {
     "double_click_xy":     "e.g. 450, 300",
     "wait_image":          "(not needed)",
     "scroll":              "down, 5  or  up, 3  (wheel clicks)",
-    "key":                 "e.g. enter / tab / f5",
+    "key":                 "e.g. enter, backspace, ctrl+a, ctrl+shift+s",
     "type_text":           "text or file path",
+    "fill_field":          "847 or paste:847|enter  (see README)",
     "ui_delete":           "empty, or 'enter' to confirm the dialog",
     "ocr_check":           "word to find, e.g. pass",
     "verify_text":         "keyword to expect, e.g. pass",
@@ -409,13 +489,35 @@ class Runner(QThread):
             )
 
         elif a == "key":
-            pyautogui.press(val)
+            press_key_spec(val)
             self.log.emit(f"[{i}] ✓ {label}: {val}", "ok")
 
         elif a == "type_text":
             text = self._expand(val)
             pyautogui.write(text, interval=0.01)
             self.log.emit(f"[{i}] ✓ {label}: {text}", "ok")
+
+        elif a == "fill_field":
+            method, text_raw, confirm = parse_fill_field_value(val)
+            text = self._expand(text_raw)
+            if not text and text_raw:
+                text = text_raw
+            click_xy = None
+            target = st["image"].strip()
+            if target:
+                if _is_xy(target):
+                    click_xy = _parse_xy(target)
+                elif os.path.isfile(target):
+                    click_xy = self._locate(target, to, find)
+                else:
+                    raise RuntimeError(f"fill field target not found: {target}")
+            fill_input_field(text, method=method, confirm_key=confirm, click_xy=click_xy)
+            extra = f" + {confirm}" if confirm else ""
+            self.log.emit(
+                f"[{i}] ✓ {label} ({method}): {text!r}{extra}"
+                + (f" @ {click_xy}" if click_xy else ""),
+                "ok",
+            )
 
         elif a == "ui_delete":
             # UI-удаление: жмём Delete по тому, что выделено на экране (после click).
@@ -1751,6 +1853,8 @@ class MainWindow(QMainWindow):
         if img is not None:
             if action == "scroll":
                 img.setPlaceholderText("template png — capture large area, then mark scroll bar")
+            elif action == "fill_field":
+                img.setPlaceholderText("field template (capture input) or x,y — optional if prior step clicks")
             else:
                 img.setPlaceholderText("path to png (or x,y,w,h for OCR)")
 
@@ -1900,7 +2004,7 @@ class MainWindow(QMainWindow):
             img.crop((lx, ly, lx + lw, ly + lh)).save(path)
             img_field.setText(path)
             self._log(f"Captured template → {path} (step {row + 1})", "ok")
-            if action in TEMPLATE_ACTIONS:
+            if action in TEMPLATE_ACTIONS or action == "fill_field":
                 save_template_meta(path, default_template_meta(lw, lh))
                 self.table.setCurrentCell(row, 0)
                 if self._open_template_editor(path):
