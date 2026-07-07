@@ -52,7 +52,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QLabel, QTextEdit, QFileDialog, QSpinBox, QHeaderView,
     QDoubleSpinBox, QSplitter, QDialog, QScrollArea, QAbstractItemView,
     QListWidget, QListWidgetItem, QFrame,
-    QStyle, QStyleOptionButton, QStyleOptionHeader,
+    QStyle, QStyleOptionButton, QStyleOptionHeader, QToolTip,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QRect, QPoint, QTimer
 from PySide6.QtGui import QColor, QImage, QPixmap, QPainter, QPen, QShortcut, QKeySequence, QAction
@@ -362,6 +362,9 @@ ACTIONS = {
     "ui_delete":           "Delete on-screen item (Delete key)",
     "ocr_check":           "OCR check (search for word)",
     "verify_text":         "Verify text & save proof (pass/fail)",
+    "branch_image":        "IF template found → JSON A else JSON B",
+    "branch_text":         "IF word found (OCR) → JSON A else JSON B",
+    "branch_verify":       "IF word found → JSON A else JSON B (+ proof screenshot)",
     "screenshot":          "Screenshot of area",
     "select_target":       "Select folder/file (for next step)",
     "create_folder":       "Create folder",
@@ -384,6 +387,9 @@ VALUE_HINT = {
     "ui_delete":           "empty, or 'enter' to confirm the dialog",
     "ocr_check":           "word to find, e.g. pass",
     "verify_text":         "keyword to expect, e.g. pass",
+    "branch_image":        "wayA.json | wayB.json  (empty side = continue)",
+    "branch_text":         "word | wayA.json | wayB.json",
+    "branch_verify":       "word | wayA.json | wayB.json  (+ saves PASS/FAIL proof)",
     "screenshot":          "name, e.g. unit_{serial}\\log.png",
     "select_target":       "path to select, e.g. results\\unit_{serial}",
     "create_folder":       "path, e.g. results\\unit_{serial}",
@@ -395,6 +401,114 @@ VALUE_HINT = {
 # Колонки таблицы
 COL_ON, COL_ACTION, COL_IMAGE, COL_BROWSE, COL_PREVIEW, COL_VALUE, COL_TIMEOUT, COL_FIND, COL_STOP = range(9)
 
+BRANCH_ACTIONS = frozenset({"branch_image", "branch_text", "branch_verify"})
+MAX_BRANCH_DEPTH = 25
+
+# Подсказки к колонкам таблицы шагов (видны в панели над таблицей + при наведении на заголовок)
+COLUMN_HELP = {
+    COL_ON: (
+        "ON — enable/disable this step.\n"
+        "Unchecked steps are skipped when the scenario runs.\n"
+        "The checkbox in this header toggles ALL rows at once."
+    ),
+    COL_ACTION: (
+        "ACTION — what this step does.\n"
+        "Includes conditional branches (IF … → JSON A else JSON B):\n"
+        "• IF template found — branch on image on screen.\n"
+        "• IF word found (OCR) — branch on text in a region.\n"
+        "• IF word found (+ proof) — branch + PASS/FAIL screenshot.\n"
+        "Use ↷ Branch setup to pick Way A / Way B JSON files."
+    ),
+    COL_IMAGE: (
+        "TEMPLATE / AREA — the target for this step.\n"
+        "• Image actions: path to a PNG template to find on screen.\n"
+        "• OCR / screenshot actions: a screen region as x,y,w,h.\n"
+        "Use the … button or 📷 Capture to fill this in automatically."
+    ),
+    COL_BROWSE: (
+        "… (Browse) — pick a template image file from disk\n"
+        "and put its path into the Template / area column."
+    ),
+    COL_PREVIEW: (
+        "PREVIEW — thumbnail of the step's template image,\n"
+        "so you can tell steps apart at a glance.\n"
+        "Click a thumbnail to view it full size."
+    ),
+    COL_VALUE: (
+        "VALUE — action-specific input.\n"
+        "For branch steps: word | wayA.json | wayB.json "
+        "(or wayA | wayB for image branch).\n"
+        "Use ↷ Branch setup — empty side = continue this scenario.\n"
+        "Tokens {serial} {date} {time} {ts} are expanded at run time."
+    ),
+    COL_TIMEOUT: (
+        "TIMEOUT — max seconds to keep searching for the template\n"
+        "or text before this step fails (or the pause length)."
+    ),
+    COL_FIND: (
+        "FIND WIN — if the target isn't visible, cycle through open\n"
+        "windows (Alt+Tab style) to bring it forward and find it.\n"
+        "Default off. The header checkbox toggles ALL rows."
+    ),
+    COL_STOP: (
+        "STOP — if this step errors, stop the whole scenario.\n"
+        "If unchecked, the run continues with the next step.\n"
+        "The header checkbox toggles ALL rows."
+    ),
+}
+
+COLUMN_GUIDE_DEFAULT = (
+    "Column guide — hover a header below for details:  "
+    "On = enable step  |  Action = step type  |  Template/area = png or x,y,w,h  |  "
+    "… = browse file  |  Preview = thumbnail  |  Value = extra input  |  "
+    "Timeout = seconds  |  Find win = search windows  |  Stop = halt on error"
+)
+
+
+def parse_branch_value(action, val):
+    """Разбирает Value условного шага → (keyword, path_a, path_b)."""
+    parts = [p.strip() for p in (val or "").split("|")]
+    if action == "branch_image":
+        return "", parts[0] if len(parts) > 0 else "", parts[1] if len(parts) > 1 else ""
+    return (
+        parts[0] if len(parts) > 0 else "",
+        parts[1] if len(parts) > 1 else "",
+        parts[2] if len(parts) > 2 else "",
+    )
+
+
+def format_branch_value(action, keyword, path_a, path_b):
+    """Собирает Value для условного шага."""
+    if action == "branch_image":
+        return f"{path_a} | {path_b}"
+    return f"{keyword} | {path_a} | {path_b}"
+
+
+def resolve_scenario_path(path, base_dir):
+    """Абсолютный путь к JSON-сценарию (относительные — от папки текущего сценария)."""
+    if not path or not str(path).strip():
+        return ""
+    path = str(path).strip()
+    if os.path.isabs(path):
+        return os.path.normpath(path)
+    base = base_dir or os.getcwd()
+    return os.path.normpath(os.path.join(base, path))
+
+
+def path_for_scenario_storage(path, base_dir):
+    """Сохраняем относительный путь, если JSON рядом со сценарием (удобно переносить)."""
+    if not path or not str(path).strip():
+        return ""
+    abs_p = os.path.normpath(os.path.abspath(path))
+    base = os.path.abspath(base_dir or os.getcwd())
+    try:
+        rel = os.path.relpath(abs_p, base)
+        if not rel.startswith(".."):
+            return rel
+    except ValueError:
+        pass
+    return abs_p
+
 
 # ============================================================================
 # ДВИЖОК ВЫПОЛНЕНИЯ (в отдельном потоке, чтобы GUI не подвисал)
@@ -404,9 +518,10 @@ class Runner(QThread):
     log = Signal(str, str)        # (текст, уровень: info/ok/err/skip)
     finished_all = Signal()
     serial_update = Signal(str)   # следующий серийный номер (чтобы прогон продолжался)
+    branch_request = Signal(str)  # путь к JSON-сценарию, на который надо перейти
 
     def __init__(self, steps, start_delay, own_title="AutoBuilder",
-                 serial_start="0001"):
+                 serial_start="0001", scenario_dir=None):
         super().__init__()
         self.steps = steps
         self.start_delay = start_delay
@@ -415,6 +530,8 @@ class Runner(QThread):
         self._selected = ""             # выбранная папка/файл (для delete/rename)
         self._stop = False
         self._own_minimized = False
+        self._branch_target = None      # JSON, выбранный условным переходом (branch)
+        self._scenario_dir = scenario_dir or os.getcwd()
 
     def stop(self):
         self._stop = True
@@ -452,11 +569,20 @@ class Runner(QThread):
                         break
                     else:
                         self.log.emit("Continuing with the next step.", "info")
+
+                # условный переход: оставшиеся шаги пропускаются, дальше — другой JSON
+                if self._branch_target:
+                    self.log.emit(
+                        f"↷ Branching to {os.path.basename(self._branch_target)} — "
+                        "remaining steps of this scenario are skipped.", "info")
+                    break
         finally:
             # если прятали своё окно ради «чистого рабочего стола» — вернём его
             self._restore_own()
 
         self.serial_update.emit(self._serial)   # запомнить, где остановился счётчик
+        if self._branch_target and not self._stop:
+            self.branch_request.emit(self._branch_target)
         self.log.emit("=== Done ===", "info")
         self.finished_all.emit()
 
@@ -654,6 +780,58 @@ class Runner(QThread):
                 time.sleep(0.2)
                 waited += 0.2
             self.log.emit(f"[{i}] ✓ {label} finished", "ok")
+
+        elif a in ("branch_image", "branch_text", "branch_verify"):
+            # Условный переход («узел»): проверяем условие и выбираем JSON-сценарий.
+            # Пустой путь на выбранной стороне = продолжаем текущий сценарий.
+            keyword, path_a, path_b = parse_branch_value(a, val)
+            if a == "branch_image":
+                if not path_a and not path_b:
+                    raise RuntimeError(
+                        "Configure branch paths: Way A | Way B "
+                        "(use ↷ Branch setup button)")
+                try:
+                    self._locate(st["image"], to, find)
+                    found = True
+                except TimeoutError:
+                    found = False
+                cond = "template FOUND" if found else "template NOT found"
+            else:
+                if not keyword:
+                    raise RuntimeError("branch keyword is empty")
+                if not path_a and not path_b:
+                    raise RuntimeError(
+                        "Configure branch paths: word | Way A | Way B "
+                        "(use ↷ Branch setup button)")
+                found, _ = self._find_text(st["image"], keyword, to, find)
+                cond = f"'{keyword}' FOUND" if found else f"'{keyword}' NOT found"
+                if a == "branch_verify":
+                    os.makedirs("results", exist_ok=True)
+                    status = "PASS" if found else "FAIL"
+                    img, left, top = grab_all()
+                    region = self._region_tuple(st["image"])
+                    if region:
+                        x, y, w, hh = region
+                        img = img.crop((x - left, y - top, x - left + w, y - top + hh))
+                    safe = "".join(c if c.isalnum() else "_" for c in (keyword or "check"))
+                    proof = os.path.join("results", f"{status}_{safe}_{int(time.time())}.png")
+                    img.save(proof)
+                    self.log.emit(f"[{i}]   proof screenshot → {proof}", "info")
+
+            side = "A" if found else "B"
+            raw = path_a if found else path_b
+            target = self._resolve_branch_path(raw)
+            if not target:
+                self.log.emit(
+                    f"[{i}] ✓ {label}: {cond} → way {side} is empty, "
+                    "continuing this scenario", "ok")
+            else:
+                if not os.path.isfile(target):
+                    raise FileNotFoundError(f"branch scenario not found: {target}")
+                self._branch_target = target
+                self.log.emit(
+                    f"[{i}] ✓ {label}: {cond} → way {side}: "
+                    f"{os.path.basename(target)}", "ok")
 
     # масштабы для мультимасштабного поиска (DPI/разное разрешение экрана)
     _SCALES = (1.0, 0.9, 1.1, 0.8, 1.25, 0.75, 0.67, 1.5, 0.6, 0.5, 2.0)
@@ -901,6 +1079,13 @@ class Runner(QThread):
             text = text.replace("{serial}", self._serial)
             self._serial = self._increment_serial(self._serial)   # каждое использование +1
         return text
+
+    def _resolve_branch_path(self, path):
+        """Путь к JSON ветки: токены + относительный путь от папки сценария."""
+        if not path:
+            return ""
+        expanded = self._expand(path.strip())
+        return resolve_scenario_path(expanded, self._scenario_dir)
 
     @staticmethod
     def _increment_serial(s):
@@ -1591,6 +1776,139 @@ class ImagePreviewDialog(QDialog):
 
 
 # ============================================================================
+# СПРАВКА ПО КОЛОНКАМ ТАБЛИЦЫ
+# ============================================================================
+
+class ColumnHelpDialog(QDialog):
+    """Полное описание всех колонок таблицы шагов."""
+
+    _LABELS = [
+        "On", "Action", "Template / area", "…", "Preview",
+        "Value", "Timeout", "Find win", "Stop",
+    ]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Column guide — all columns explained")
+        self.setMinimumSize(520, 420)
+        lay = QVBoxLayout(self)
+        text = QTextEdit()
+        text.setReadOnly(True)
+        parts = []
+        for col, title in enumerate(self._LABELS):
+            body = COLUMN_HELP.get(col, "").strip()
+            parts.append(f"<h3 style='color:#5c93d6; margin:12px 0 4px 0;'>{title}</h3>")
+            parts.append(f"<p style='margin:0 0 8px 0; color:#ddd;'>{body.replace(chr(10), '<br>')}</p>")
+        text.setHtml("".join(parts))
+        lay.addWidget(text)
+        btn = QPushButton("Close")
+        btn.clicked.connect(self.accept)
+        lay.addWidget(btn, alignment=Qt.AlignRight)
+
+
+# ============================================================================
+# НАСТРОЙКА УСЛОВНОГО ПЕРЕХОДА (ветка A / ветка B)
+# ============================================================================
+
+class BranchConfigDialog(QDialog):
+    """Диалог выбора JSON-сценариев для веток A и B (условный «узел»)."""
+
+    def __init__(self, action, current_value="", parent=None, start_dir=""):
+        super().__init__(parent)
+        self._action = action
+        self._start_dir = start_dir or os.getcwd()
+        titles = {
+            "branch_image": "Branch on template (image found?)",
+            "branch_text": "Branch on OCR text (word found?)",
+            "branch_verify": "Branch on verify result (word found? + proof)",
+        }
+        self.setWindowTitle(titles.get(action, "Configure branch"))
+        self.setMinimumWidth(520)
+        lay = QVBoxLayout(self)
+
+        help_text = {
+            "branch_image": (
+                "Checks whether the template in Template/area is visible on screen.\n"
+                "• Way A — runs if the template IS found.\n"
+                "• Way B — runs if the template is NOT found.\n"
+                "Leave a side empty to continue the remaining steps in THIS scenario."
+            ),
+            "branch_text": (
+                "Reads text in the OCR region (Template/area: x,y,w,h) and searches for a keyword.\n"
+                "• Way A — runs if the word IS found.\n"
+                "• Way B — runs if the word is NOT found."
+            ),
+            "branch_verify": (
+                "Like OCR branch, but also saves a PASS/FAIL proof screenshot to results\\.\n"
+                "• Way A — runs if the keyword IS found (PASS).\n"
+                "• Way B — runs if NOT found (FAIL). Never stops the scenario on its own."
+            ),
+        }
+        hint = QLabel(help_text.get(action, ""))
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color:#aaa; margin-bottom:8px;")
+        lay.addWidget(hint)
+
+        keyword, path_a, path_b = parse_branch_value(action, current_value)
+
+        self._keyword = QLineEdit(keyword)
+        if action != "branch_image":
+            lay.addWidget(QLabel("Keyword to search for:"))
+            lay.addWidget(self._keyword)
+
+        self._path_a = QLineEdit(path_a)
+        self._path_b = QLineEdit(path_b)
+        lay_a = QHBoxLayout()
+        lay_a.addWidget(self._path_a, stretch=1)
+        btn_a = QPushButton("Browse…")
+        btn_a.clicked.connect(lambda: self._pick_json(self._path_a))
+        lay_a.addWidget(btn_a)
+        lay.addWidget(QLabel("Way A — if condition is TRUE (found / PASS):"))
+        lay.addLayout(lay_a)
+
+        lay_b = QHBoxLayout()
+        lay_b.addWidget(self._path_b, stretch=1)
+        btn_b = QPushButton("Browse…")
+        btn_b.clicked.connect(lambda: self._pick_json(self._path_b))
+        lay_b.addWidget(btn_b)
+        lay.addWidget(QLabel("Way B — if condition is FALSE (not found / FAIL):"))
+        lay.addLayout(lay_b)
+
+        note = QLabel(
+            "Tip: nested branches work — a branch JSON can contain another branch step.\n"
+            "Paths are stored relative to the current scenario folder when possible."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color:#888; font-size:11px; margin-top:6px;")
+        lay.addWidget(note)
+
+        btns = QHBoxLayout()
+        btns.addStretch()
+        ok = QPushButton("OK")
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(ok)
+        btns.addWidget(cancel)
+        lay.addLayout(btns)
+
+    def _pick_json(self, edit):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select branch scenario (JSON)", self._start_dir, "JSON (*.json)"
+        )
+        if path:
+            edit.setText(path_for_scenario_storage(path, self._start_dir))
+
+    def result_value(self):
+        kw = self._keyword.text().strip() if self._action != "branch_image" else ""
+        return format_branch_value(
+            self._action, kw,
+            self._path_a.text().strip(),
+            self._path_b.text().strip(),
+        )
+
+
+# ============================================================================
 # ЗАГОЛОВОК ТАБЛИЦЫ С МАСТЕР-ЧЕКБОКСАМИ
 # ============================================================================
 
@@ -1598,11 +1916,43 @@ class MasterCheckboxHeader(QHeaderView):
     """Чекбокс в заголовке колонки — включить/выключить все строки сразу."""
 
     masterToggled = Signal(int, bool)
+    columnHovered = Signal(int)   # индекс колонки под курсором, -1 = нет
 
-    def __init__(self, checkbox_cols, parent=None):
+    def __init__(self, checkbox_cols, column_help=None, parent=None):
         super().__init__(Qt.Horizontal, parent)
         self._checkbox_cols = set(checkbox_cols)
         self._states = {COL_ON: True, COL_FIND: False, COL_STOP: True}
+        self._column_help = column_help or {}
+        self._hover_col = -1
+        self.setMouseTracking(True)
+        # подписи сверху по центру — чтобы master-чекбокс поместился снизу
+        self.setDefaultAlignment(Qt.AlignHCenter | Qt.AlignTop)
+
+    def setColumnHelp(self, column_help):
+        self._column_help = column_help or {}
+
+    def _global_pos(self, event):
+        if hasattr(event, "globalPosition"):
+            return event.globalPosition().toPoint()
+        return event.globalPos()
+
+    def mouseMoveEvent(self, event):
+        idx = self.logicalIndexAt(event.pos())
+        if idx != self._hover_col:
+            self._hover_col = idx
+            self.columnHovered.emit(idx)
+        tip = self._column_help.get(idx, "") if idx >= 0 else ""
+        if tip:
+            QToolTip.showText(self._global_pos(event), tip, self)
+        else:
+            QToolTip.hideText()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover_col = -1
+        self.columnHovered.emit(-1)
+        QToolTip.hideText()
+        super().leaveEvent(event)
 
     def setMasterState(self, col, checked):
         if col in self._checkbox_cols:
@@ -1615,31 +1965,27 @@ class MasterCheckboxHeader(QHeaderView):
             self.sectionSize(logical_index), self.height(),
         )
 
-    @staticmethod
-    def _checkbox_rect(section_rect):
-        box = 18
+    def _checkbox_rect(self, section_rect):
+        # Чекбокс в нижней части секции, подпись колонки — сверху (как у обычных).
+        box = 16
         return QRect(
             section_rect.x() + (section_rect.width() - box) // 2,
-            section_rect.y() + (section_rect.height() - box) // 2,
+            section_rect.bottom() - box - 4,
             box, box,
         )
 
     def paintSection(self, painter, rect, logical_index):
-        painter.save()
-        opt = QStyleOptionHeader()
-        self.initStyleOption(opt)
-        opt.rect = rect
-        opt.section = logical_index
+        # Сначала обычная отрисовка Qt — у ВСЕХ колонок видна подпись заголовка.
+        super().paintSection(painter, rect, logical_index)
+        # Для колонок-переключателей добавляем master-чекбокс под подписью.
         if logical_index in self._checkbox_cols:
-            opt.text = ""
-        self.style().drawControl(QStyle.CE_Header, opt, painter, self)
-        if logical_index in self._checkbox_cols:
+            painter.save()
             cb_opt = QStyleOptionButton()
             cb_opt.rect = self._checkbox_rect(rect)
             cb_opt.state = QStyle.State_Enabled
             cb_opt.state |= QStyle.State_On if self._states[logical_index] else QStyle.State_Off
             self.style().drawControl(QStyle.CE_CheckBox, cb_opt, painter)
-        painter.restore()
+            painter.restore()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -1661,17 +2007,20 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AutoBuilder — automation builder")
-        self.setMinimumSize(560, 380)
-        # компактный старт ~половина экрана (можно развернуть на весь экран)
+        self.setMinimumSize(900, 560)
+        # просторный старт (~три четверти экрана) — элементы читаемы даже не в фуллскрине
         scr = QApplication.primaryScreen().availableGeometry()
-        w, h = int(scr.width() * 0.5), int(scr.height() * 0.6)
-        self.resize(w, h)
-        self.move(scr.x() + (scr.width() - w) // 2, scr.y() + (scr.height() - h) // 2)
+        win_w, win_h = int(scr.width() * 0.78), int(scr.height() * 0.82)
+        self.resize(win_w, win_h)
+        self.move(scr.x() + (scr.width() - win_w) // 2, scr.y() + (scr.height() - win_h) // 2)
         self.runner = None
         self._clipboard = []
         self._playlist_active = False
         self._playlist_index = -1
         self._blink_on = False
+        self._scenario_path = ""       # путь текущего JSON (для относительных веток)
+        self._pending_branch = None    # JSON, на который перейти после текущего прогона
+        self._branch_depth = 0         # защита от бесконечных циклов ветвления
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1698,23 +2047,18 @@ class MainWindow(QMainWindow):
         self.btn_regions.setToolTip(
             "Edit compare / exclude / click or scroll-bar regions for the selected step"
         )
+        self.btn_branch = QPushButton("↷ Branch setup")
+        self.btn_branch.setToolTip(
+            "Configure Way A / Way B JSON scenarios for the selected branch step"
+        )
+        self.btn_branch.setEnabled(False)
         self.btn_save  = QPushButton("💾 Save")
         self.btn_load  = QPushButton("📂 Load")
         self.btn_stop.setEnabled(False)
 
+        # Ряд 1 — запуск и параметры прогона
         top.addWidget(self.btn_run)
         top.addWidget(self.btn_stop)
-        top.addSpacing(20)
-        top.addWidget(self.btn_add)
-        top.addWidget(self.btn_insert)
-        top.addWidget(self.btn_copy)
-        top.addWidget(self.btn_paste)
-        top.addWidget(self.btn_del)
-        top.addWidget(self.btn_up)
-        top.addWidget(self.btn_down)
-        top.addSpacing(20)
-        top.addWidget(self.btn_snip)
-        top.addWidget(self.btn_regions)
         top.addStretch()
         top.addWidget(QLabel("Start delay, s:"))
         self.spin_delay = QDoubleSpinBox()
@@ -1737,14 +2081,59 @@ class MainWindow(QMainWindow):
         top.addWidget(self.btn_load)
         root.addLayout(top)
 
+        # Ряд 2 — редактирование шагов
+        tools = QHBoxLayout()
+        tools.addWidget(self.btn_add)
+        tools.addWidget(self.btn_insert)
+        tools.addWidget(self.btn_copy)
+        tools.addWidget(self.btn_paste)
+        tools.addWidget(self.btn_del)
+        tools.addSpacing(16)
+        tools.addWidget(self.btn_up)
+        tools.addWidget(self.btn_down)
+        tools.addSpacing(16)
+        tools.addWidget(self.btn_snip)
+        tools.addWidget(self.btn_regions)
+        tools.addWidget(self.btn_branch)
+        tools.addStretch()
+        root.addLayout(tools)
+
         # --- Левая часть: таблица сверху, лог снизу ---
         left_splitter = QSplitter(Qt.Vertical)
+        left_splitter.setHandleWidth(7)
+        left_splitter.setChildrenCollapsible(False)
 
         # Таблица шагов
+        table_box = QWidget()
+        table_layout = QVBoxLayout(table_box)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        table_layout.setSpacing(4)
+
+        guide_hdr = QHBoxLayout()
+        guide_hdr.addWidget(QLabel("Column guide:"))
+        self.btn_col_help = QPushButton("Show all columns")
+        self.btn_col_help.setToolTip("Open a window with full explanation of every column")
+        self.btn_col_help.clicked.connect(self._show_all_column_help)
+        guide_hdr.addWidget(self.btn_col_help)
+        guide_hdr.addStretch()
+        table_layout.addLayout(guide_hdr)
+
+        self.column_guide = QLabel(COLUMN_GUIDE_DEFAULT)
+        self.column_guide.setWordWrap(True)
+        self.column_guide.setTextFormat(Qt.AutoText)
+        self.column_guide.setStyleSheet(
+            "color:#b8c0c8; padding:6px 8px; background:#1a1d20; "
+            "border:1px solid #3a3f44; border-radius:4px;"
+        )
+        table_layout.addWidget(self.column_guide)
+
         self.table = QTableWidget(0, 9)
-        self._header = MasterCheckboxHeader([COL_ON, COL_FIND, COL_STOP], self.table)
+        self._header = MasterCheckboxHeader(
+            [COL_ON, COL_FIND, COL_STOP], COLUMN_HELP, self.table
+        )
         self.table.setHorizontalHeader(self._header)
         self._header.masterToggled.connect(self._master_toggle_column)
+        self._header.columnHovered.connect(self._update_column_guide)
         self.table.setHorizontalHeaderLabels(
             ["On", "Action", "Template / area", "…", "Preview",
              "Value", "Timeout", "Find win", "Stop"]
@@ -1761,24 +2150,17 @@ class MainWindow(QMainWindow):
         self.table.setColumnWidth(COL_TIMEOUT, 70)
         self.table.setColumnWidth(COL_FIND, 60)
         self.table.setColumnWidth(COL_STOP, 50)
-        self.table.horizontalHeaderItem(COL_PREVIEW).setToolTip(
-            "Thumbnail of the step's template image. Click a thumbnail to view "
-            "it full size (helps tell steps apart)."
-        )
+        self._header.setFixedHeight(42)
         # строки повыше, чтобы миниатюры были видны
         self.table.verticalHeader().setDefaultSectionSize(48)
-        self.table.horizontalHeaderItem(COL_FIND).setToolTip(
-            "Search for the window/element: if the target isn't visible, cycle "
-            "through open windows (Alt+Tab style) to find it. Default off. "
-            "Header checkbox toggles ALL rows."
-        )
-        self.table.horizontalHeaderItem(COL_ON).setToolTip(
-            "Enable/disable step. Header checkbox toggles ALL rows."
-        )
-        self.table.horizontalHeaderItem(COL_STOP).setToolTip(
-            "Stop scenario on error. Header checkbox toggles ALL rows."
-        )
-        left_splitter.addWidget(self.table)
+
+        for col, text in COLUMN_HELP.items():
+            item = self.table.horizontalHeaderItem(col)
+            if item is not None:
+                item.setToolTip(text)
+
+        table_layout.addWidget(self.table)
+        left_splitter.addWidget(table_box)
 
         # Лог
         log_box = QWidget()
@@ -1787,16 +2169,18 @@ class MainWindow(QMainWindow):
         log_layout.addWidget(QLabel("Execution log:"))
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
-        self.log_view.setStyleSheet("font-family: Consolas, monospace; font-size: 12px;")
+        self.log_view.setStyleSheet("font-family: Consolas, monospace; font-size: 13px;")
         log_layout.addWidget(self.log_view)
         left_splitter.addWidget(log_box)
 
-        left_splitter.setSizes([400, 250])
+        left_splitter.setSizes([int(win_h * 0.62), int(win_h * 0.32)])
 
         # --- Правая часть: playlist + отдельный лог ---
         self.playlist_box = QWidget()
+        self.playlist_box.setMinimumWidth(260)
         playlist_layout = QVBoxLayout(self.playlist_box)
-        playlist_layout.setContentsMargins(4, 0, 0, 0)
+        playlist_layout.setContentsMargins(6, 0, 0, 0)
+        playlist_layout.setSpacing(6)
 
         hdr = QHBoxLayout()
         hdr.addWidget(QLabel("Program playlist (JSON):"))
@@ -1835,16 +2219,19 @@ class MainWindow(QMainWindow):
         playlist_layout.addWidget(QLabel("Playlist log:"))
         self.playlist_log_view = QTextEdit()
         self.playlist_log_view.setReadOnly(True)
-        self.playlist_log_view.setStyleSheet("font-family: Consolas, monospace; font-size: 12px;")
+        self.playlist_log_view.setStyleSheet("font-family: Consolas, monospace; font-size: 13px;")
         playlist_layout.addWidget(self.playlist_log_view, stretch=1)
 
         # --- Общий сплиттер: слева сценарий, справа плейлист ---
         self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.setHandleWidth(7)
+        self.main_splitter.setChildrenCollapsible(False)
         self.main_splitter.addWidget(left_splitter)
         self.main_splitter.addWidget(self.playlist_box)
         self.main_splitter.setStretchFactor(0, 4)
         self.main_splitter.setStretchFactor(1, 2)
-        self.main_splitter.setSizes([980, 420])
+        # пропорции от реальной ширины окна, чтобы плейлист не «схлопывался»
+        self.main_splitter.setSizes([int(win_w * 0.66), int(win_w * 0.34)])
         root.addWidget(self.main_splitter)
 
         # --- Сигналы ---
@@ -1861,6 +2248,8 @@ class MainWindow(QMainWindow):
         self.btn_load.clicked.connect(self.load_scenario)
         self.btn_snip.clicked.connect(self.capture_region)
         self.btn_regions.clicked.connect(self.edit_template_regions)
+        self.btn_branch.clicked.connect(self.edit_branch_paths)
+        self.table.itemSelectionChanged.connect(self._update_branch_btn)
         self.btn_pl_add.clicked.connect(self.playlist_add_files)
         self.btn_pl_remove.clicked.connect(self.playlist_remove_selected)
         self.btn_pl_up.clicked.connect(lambda: self.playlist_move(-1))
@@ -1985,6 +2374,7 @@ class MainWindow(QMainWindow):
         combo.currentIndexChanged.connect(
             lambda _=0, c=combo, v=val, im=img: self._update_hint(c, v, im)
         )
+        combo.currentIndexChanged.connect(lambda _=0: self._update_branch_btn())
 
         to = QSpinBox()
         to.setRange(1, 600)
@@ -2006,6 +2396,7 @@ class MainWindow(QMainWindow):
 
     def _center(self, widget, row, col):
         wrap = QWidget()
+        wrap.setStyleSheet("background: transparent;")
         lay = QHBoxLayout(wrap)
         lay.addWidget(widget)
         lay.setAlignment(Qt.AlignCenter)
@@ -2026,6 +2417,10 @@ class MainWindow(QMainWindow):
                 img.setPlaceholderText("template png — capture large area, then mark scroll bar")
             elif action == "fill_field":
                 img.setPlaceholderText("capture label+field — then set compare / input zone")
+            elif action in BRANCH_ACTIONS:
+                img.setPlaceholderText(
+                    "template png (image branch) or x,y,w,h OCR region (text branch)"
+                )
             else:
                 img.setPlaceholderText("path to png (or x,y,w,h for OCR)")
 
@@ -2036,6 +2431,51 @@ class MainWindow(QMainWindow):
         )
         if path:
             edit.setText(path)
+
+    def _update_column_guide(self, col):
+        """Обновляет видимую панель подсказки при наведении на заголовок колонки."""
+        if col >= 0 and col in COLUMN_HELP:
+            titles = ColumnHelpDialog._LABELS
+            title = titles[col] if col < len(titles) else f"Column {col}"
+            self.column_guide.setText(f"<b>{title}</b> — {COLUMN_HELP[col].replace(chr(10), ' ')}")
+        else:
+            self.column_guide.setText(COLUMN_GUIDE_DEFAULT)
+
+    def _show_all_column_help(self):
+        ColumnHelpDialog(self).exec()
+
+    def _update_branch_btn(self):
+        row = self.table.currentRow()
+        enabled = False
+        if row >= 0:
+            combo = self.table.cellWidget(row, COL_ACTION)
+            if combo and combo.currentData() in BRANCH_ACTIONS:
+                enabled = True
+        self.btn_branch.setEnabled(enabled)
+
+    def edit_branch_paths(self):
+        """Открыть диалог настройки веток A/B для выбранного условного шага."""
+        row = self.table.currentRow()
+        if row < 0:
+            self._log("Select a branch step first (IF … → JSON A else JSON B).", "err")
+            return
+        combo = self.table.cellWidget(row, COL_ACTION)
+        action = combo.currentData()
+        if action not in BRANCH_ACTIONS:
+            self._log(
+                "Change Action to a branch type first:\n"
+                "  • IF template found → JSON A else JSON B\n"
+                "  • IF word found (OCR) → JSON A else JSON B\n"
+                "  • IF word found (+ proof) → JSON A else JSON B",
+                "err",
+            )
+            return
+        val_field = self.table.cellWidget(row, COL_VALUE)
+        base = os.path.dirname(self._scenario_path) if self._scenario_path else os.getcwd()
+        dlg = BranchConfigDialog(action, val_field.text(), self, start_dir=base)
+        if dlg.exec() == QDialog.Accepted:
+            val_field.setText(dlg.result_value())
+            self._log(f"Branch paths set for step {row + 1}.", "ok")
 
     def _open_preview(self, path):
         """Показ шаблона в полном размере по клику на миниатюре."""
@@ -2178,7 +2618,7 @@ class MainWindow(QMainWindow):
             else:
                 self._log("Mark compare / exclude / scroll bar with ✏ Regions.", "info")
 
-        elif action in ("ocr_check", "verify_text"):
+        elif action in ("ocr_check", "verify_text", "branch_text", "branch_verify"):
             img_field.setText(f"{ax}, {ay}, {lw}, {lh}")
             self._log(f"Captured OCR region {ax},{ay},{lw},{lh} → step {row + 1}", "ok")
 
@@ -2294,7 +2734,8 @@ class MainWindow(QMainWindow):
     def toggle_playlist_panel(self, checked):
         if checked:
             self.playlist_box.show()
-            self.main_splitter.setSizes([980, 420])
+            total = max(self.main_splitter.width(), 900)
+            self.main_splitter.setSizes([int(total * 0.66), int(total * 0.34)])
         else:
             self.playlist_box.hide()
 
@@ -2390,6 +2831,7 @@ class MainWindow(QMainWindow):
         self.table.setRowCount(0)
         for st in steps:
             self.add_step(st)
+        self._scenario_path = os.path.abspath(path)
         if for_playlist:
             self._playlist_log(f"Loaded {len(steps)} step(s): {os.path.basename(path)}", "ok")
         else:
@@ -2405,6 +2847,7 @@ class MainWindow(QMainWindow):
             return
         self._playlist_active = True
         self._playlist_index = 0
+        self._branch_depth = 0
         self.playlist_log_view.clear()
         self._playlist_log(f"Starting playlist with {self.playlist_list.count()} program(s).", "info")
         self.btn_pl_run.setEnabled(False)
@@ -2415,6 +2858,7 @@ class MainWindow(QMainWindow):
     def _run_playlist_item(self):
         if not self._playlist_active:
             return
+        self._branch_depth = 0
         if self._playlist_index >= self.playlist_list.count():
             self._playlist_log("Playlist completed successfully.", "ok")
             self._playlist_active = False
@@ -2436,6 +2880,7 @@ class MainWindow(QMainWindow):
     def playlist_stop(self):
         self._playlist_active = False
         self._playlist_index = -1
+        self._pending_branch = None
         self.btn_pl_run.setEnabled(True)
         self.btn_pl_stop.setEnabled(False)
         self._set_play_state("stopped")
@@ -2445,20 +2890,25 @@ class MainWindow(QMainWindow):
 
     # ---------- запуск / стоп ----------
 
-    def run_scenario(self):
+    def run_scenario(self, from_branch=False):
         steps = self._all_steps()
         if not steps:
             self._log("No steps to execute.", "err")
             return
+        if not from_branch:
+            self._branch_depth = 0
         self.log_view.clear()
         self._log(f"Running scenario: {len(steps)} step(s)", "info")
+        scenario_dir = os.path.dirname(self._scenario_path) if self._scenario_path else os.getcwd()
         self.runner = Runner(
             steps, self.spin_delay.value(),
             own_title=self.windowTitle(),
             serial_start=self.edit_serial.text().strip() or "0001",
+            scenario_dir=scenario_dir,
         )
         self.runner.log.connect(self._log)
         self.runner.serial_update.connect(self.edit_serial.setText)
+        self.runner.branch_request.connect(self._on_branch_request)
         self.runner.finished_all.connect(self._on_finished)
         self.btn_run.setEnabled(False)
         self.btn_stop.setEnabled(True)
@@ -2468,12 +2918,43 @@ class MainWindow(QMainWindow):
         if self._playlist_active:
             self.playlist_stop()
             return
+        self._pending_branch = None
         if self.runner:
             self.runner.stop()
+
+    def _on_branch_request(self, path):
+        """Runner попросил условный переход: запомним путь до конца прогона."""
+        self._pending_branch = path
 
     def _on_finished(self):
         self.btn_run.setEnabled(True)
         self.btn_stop.setEnabled(False)
+
+        # условный переход: грузим выбранный JSON и продолжаем цепочку
+        pending, self._pending_branch = self._pending_branch, None
+        if pending:
+            self._branch_depth += 1
+            if self._branch_depth > MAX_BRANCH_DEPTH:
+                self._log(
+                    f"Branch chain too deep ({MAX_BRANCH_DEPTH}) — possible loop. Stopping.",
+                    "err",
+                )
+                if self._playlist_active:
+                    self._playlist_active = False
+                    self._playlist_index = -1
+                    self.btn_pl_run.setEnabled(True)
+                    self.btn_pl_stop.setEnabled(False)
+                    self._set_play_state("stopped")
+                return
+            name = os.path.basename(pending)
+            if self._playlist_active:
+                self._playlist_log(f"↷ Branch → {name}", "info")
+            if self._load_scenario_file(pending, for_playlist=self._playlist_active):
+                self._log(f"↷ Branch: running {name}", "info")
+                self.run_scenario(from_branch=True)
+                return          # плейлист продолжится после конца всей цепочки
+            self._log(f"Branch target failed to load: {pending}", "err")
+
         if self._playlist_active:
             self._playlist_log("Program finished.", "ok")
             self._playlist_index += 1
@@ -2496,6 +2977,7 @@ class MainWindow(QMainWindow):
             return
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self._all_steps(), f, ensure_ascii=False, indent=2)
+        self._scenario_path = os.path.abspath(path)
         self._log(f"Scenario saved: {path}", "ok")
 
     def load_scenario(self):
@@ -2505,8 +2987,114 @@ class MainWindow(QMainWindow):
         self._load_scenario_file(path, for_playlist=False)
 
 
+# ============================================================================
+# ТЕМА ОФОРМЛЕНИЯ (единый тёмный стиль — крупнее шрифт, читаемые кнопки)
+# ============================================================================
+
+APP_STYLE = """
+* { font-size: 13px; }
+QWidget { background-color: #232629; color: #e6e6e6; }
+QMainWindow, QDialog { background-color: #1e2124; }
+
+QLabel { background: transparent; }
+
+QPushButton {
+    background-color: #3a3f44;
+    border: 1px solid #4a5057;
+    border-radius: 6px;
+    padding: 6px 12px;
+    min-height: 24px;
+    color: #f0f0f0;
+}
+QPushButton:hover { background-color: #464c53; border-color: #5c93d6; }
+QPushButton:pressed { background-color: #2f343a; }
+QPushButton:disabled { background-color: #2b2e31; color: #6a6f74; border-color: #34383c; }
+
+QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {
+    background-color: #1b1e20;
+    border: 1px solid #4a5057;
+    border-radius: 5px;
+    padding: 4px 6px;
+    min-height: 24px;
+    selection-background-color: #5c93d6;
+    selection-color: #ffffff;
+}
+QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus {
+    border-color: #5c93d6;
+}
+QComboBox::drop-down { border: none; width: 20px; }
+QComboBox QAbstractItemView {
+    background-color: #232629;
+    border: 1px solid #4a5057;
+    selection-background-color: #5c93d6;
+    outline: none;
+}
+
+QTableWidget {
+    background-color: #1b1e20;
+    alternate-background-color: #212528;
+    gridline-color: #34383c;
+    border: 1px solid #3a3f44;
+}
+QTableWidget::item { padding: 2px; }
+QTableWidget::item:selected { background-color: #35506f; }
+QHeaderView::section {
+    background-color: #2f343a;
+    color: #dfe3e6;
+    padding: 6px 4px;
+    border: none;
+    border-right: 1px solid #3a3f44;
+    border-bottom: 1px solid #3a3f44;
+    font-weight: bold;
+}
+QTableCornerButton::section { background-color: #2f343a; border: none; }
+
+QListWidget {
+    background-color: #1b1e20;
+    border: 1px solid #3a3f44;
+    border-radius: 4px;
+}
+QListWidget::item { padding: 7px 5px; border-bottom: 1px solid #26292c; }
+QListWidget::item:selected { background-color: #35506f; color: #ffffff; }
+QListWidget::item:hover { background-color: #2a2e31; }
+
+QTextEdit {
+    background-color: #15181a;
+    border: 1px solid #3a3f44;
+    border-radius: 4px;
+}
+
+QSplitter::handle { background-color: #3a3f44; }
+QSplitter::handle:horizontal { width: 7px; }
+QSplitter::handle:vertical { height: 7px; }
+QSplitter::handle:hover { background-color: #5c93d6; }
+
+QScrollBar:vertical { background: #1b1e20; width: 13px; margin: 0; }
+QScrollBar::handle:vertical { background: #4a5057; border-radius: 5px; min-height: 26px; }
+QScrollBar::handle:vertical:hover { background: #5c93d6; }
+QScrollBar:horizontal { background: #1b1e20; height: 13px; margin: 0; }
+QScrollBar::handle:horizontal { background: #4a5057; border-radius: 5px; min-width: 26px; }
+QScrollBar::handle:horizontal:hover { background: #5c93d6; }
+QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: none; }
+
+QToolTip {
+    background-color: #2f343a; color: #f0f0f0;
+    border: 1px solid #5c93d6; padding: 4px;
+}
+QMenuBar { background-color: #232629; }
+QMenuBar::item { padding: 5px 10px; }
+QMenuBar::item:selected { background-color: #35506f; }
+QMenu { background-color: #232629; border: 1px solid #4a5057; }
+QMenu::item { padding: 6px 24px; }
+QMenu::item:selected { background-color: #35506f; }
+QCheckBox::indicator { width: 17px; height: 17px; }
+"""
+
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
+    app.setStyleSheet(APP_STYLE)
     win = MainWindow()
     win.show()
     sys.exit(app.exec())

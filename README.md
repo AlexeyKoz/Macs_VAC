@@ -340,6 +340,7 @@ venv\Scripts\python.exe MACS_Visual_Automation.py
    an OCR region, or a click point straight from the screen. The **Preview**
    column then shows a thumbnail of the template — click it to view full size.
    Use **✏ Regions** to edit compare/exclude/click zones for template-based steps.
+   For **branch** steps, use **↷ Branch setup** to pick Way A / Way B JSON files.
 4. Set the **Start delay** (seconds to switch to the target window before it
    begins) and the starting **Serial**.
 5. Press **▶ Run**. Watch the **Execution log** at the bottom. Press **⏹ Stop**
@@ -362,6 +363,55 @@ venv\Scripts\python.exe MACS_Visual_Automation.py
 
 ---
 
+## Conditional branching (decision nodes)
+
+Some workflows need different paths depending on what appears on screen — e.g.
+**PASS** vs **FAIL**, or one dialog vs another. Use **branch** steps as
+decision nodes in your scenario chain.
+
+### How it works
+
+1. Add a branch step (one of the **IF … → JSON A else JSON B** actions).
+2. Set **Template / area**:
+   - **Image branch** — PNG template to look for.
+   - **Text branch** — OCR region `x,y,w,h` (capture with 📷).
+3. Click **↷ Branch setup** and choose:
+   - **Way A** — JSON scenario to run if condition is **TRUE** (found / PASS).
+   - **Way B** — JSON to run if condition is **FALSE** (not found / FAIL).
+   - Leave either side **empty** to continue the **remaining steps** in the
+     current scenario instead of loading another file.
+4. When the branch step runs, remaining steps in the current JSON are **skipped**
+   if a Way A/B file was chosen. That JSON loads and runs automatically.
+5. **Nested branches** work — a branch JSON can contain another branch step.
+   The app follows the whole chain before advancing the playlist.
+
+### Example flow
+
+```
+main.json
+  step 1: open app
+  step 2: click Start
+  step 3: IF word "PASS" → pass_flow.json else fail_flow.json
+  step 4: (skipped if branch loaded a file)
+  step 5: cleanup
+
+pass_flow.json  → archive result, continue…
+fail_flow.json  → log error, notify operator…
+```
+
+### Branch types
+
+| Type | Checks | Best for |
+| --- | --- | --- |
+| **IF template found** | Is a UI image visible? | Different screens/dialogs |
+| **IF word found (OCR)** | Is a keyword in a region? | PASS/FAIL text, status labels |
+| **IF word found (+ proof)** | Same as OCR + saves `results\PASS_…png` or `FAIL_…png` | Test stations needing proof |
+
+Paths in branch setup are stored **relative to the current scenario folder**
+when possible, so you can move `scenarios\` as a group.
+
+---
+
 ## Actions reference
 
 | Action | What it does | Value field |
@@ -378,6 +428,9 @@ venv\Scripts\python.exe MACS_Visual_Automation.py
 | **Delete on-screen item (Delete key)** | UI delete: presses the **Delete** key on whatever is selected on screen (use right after a click). Optionally confirms a dialog | empty, or `enter` to confirm |
 | **OCR check (search for word)** | OCR the region; pass if the word is present | word, e.g. `pass` |
 | **Verify text & save proof** | OCR + save a PASS/FAIL screenshot into `results\` | keyword, e.g. `pass` |
+| **IF template found → JSON A else JSON B** | **Branch node:** checks if template is on screen; loads Way A or Way B JSON | `wayA.json \| wayB.json` (use **↷ Branch setup**) |
+| **IF word found (OCR) → JSON A else JSON B** | **Branch node:** OCR region + keyword; loads Way A or Way B JSON | `word \| wayA.json \| wayB.json` |
+| **IF word found (+ proof) → JSON A else JSON B** | Like OCR branch + saves PASS/FAIL proof; never fails the step | `word \| wayA.json \| wayB.json` |
 | **Screenshot of area** | Save a screenshot (region = template/area field) | name, e.g. `unit_{serial}\log.png` |
 | **Select folder/file** | Remember a path for the next folder step | path to select |
 | **Create folder** | Create a folder (also becomes "selected") | `results\unit_{serial}` |
