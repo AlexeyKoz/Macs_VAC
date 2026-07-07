@@ -51,9 +51,10 @@ from PySide6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QPushButton, QComboBox, QCheckBox,
     QLineEdit, QLabel, QTextEdit, QFileDialog, QSpinBox, QHeaderView,
     QDoubleSpinBox, QSplitter, QDialog, QScrollArea, QAbstractItemView,
+    QListWidget, QListWidgetItem, QFrame,
     QStyle, QStyleOptionButton, QStyleOptionHeader,
 )
-from PySide6.QtCore import Qt, QThread, Signal, QRect, QPoint
+from PySide6.QtCore import Qt, QThread, Signal, QRect, QPoint, QTimer
 from PySide6.QtGui import QColor, QImage, QPixmap, QPainter, QPen, QShortcut, QKeySequence
 
 # --- Автоматизация (импортим мягко, чтобы GUI открылся даже без библиотек) ---
@@ -132,8 +133,23 @@ def default_template_meta(w, h):
         "compare_rect": [0, 0, w, h],
         "exclude_rects": [],
         "click_point": [w // 2, h // 2],
+        "input_rect": None,
         "scroll_bar_rect": None,
     }
+
+
+def resolve_template_click(meta, tw0, th0):
+    """Click point in template pixels: input zone > scroll bar > click_point."""
+    ir = meta.get("input_rect")
+    if ir and len(ir) == 4:
+        ix, iy, iw, ih = _clamp_rect(*ir, tw0, th0)
+        return ix + iw // 2, iy + ih // 2
+    sb = meta.get("scroll_bar_rect")
+    if sb and len(sb) == 4:
+        sx, sy, sw, sh = _clamp_rect(*sb, tw0, th0)
+        return sx + sw // 2, sy + sh // 2
+    cpx, cpy = meta.get("click_point", [tw0 // 2, th0 // 2])
+    return max(0, min(int(cpx), tw0 - 1)), max(0, min(int(cpy), th0 - 1))
 
 
 def _clamp_rect(x, y, w, h, max_w, max_h):
@@ -160,6 +176,14 @@ def _build_compare_mask(compare_rect, exclude_rects):
 
 TEMPLATE_ACTIONS = frozenset({"click_image", "double_click_image", "wait_image"})
 REGION_EDIT_ACTIONS = TEMPLATE_ACTIONS | {"scroll", "fill_field"}
+
+
+def _editor_purpose_for_action(action):
+    if action == "scroll":
+        return "scroll"
+    if action == "fill_field":
+        return "field"
+    return "template"
 
 
 def _parse_xy(text):
@@ -356,7 +380,7 @@ VALUE_HINT = {
     "scroll":              "down, 5  or  up, 3  (wheel clicks)",
     "key":                 "e.g. enter, backspace, ctrl+a, ctrl+shift+s",
     "type_text":           "text or file path",
-    "fill_field":          "847 or paste:847|enter  (see README)",
+    "fill_field":          "paste:847|enter  — capture field, set input zone",
     "ui_delete":           "empty, or 'enter' to confirm the dialog",
     "ocr_check":           "word to find, e.g. pass",
     "verify_text":         "keyword to expect, e.g. pass",
@@ -504,13 +528,17 @@ class Runner(QThread):
                 text = text_raw
             click_xy = None
             target = st["image"].strip()
-            if target:
-                if _is_xy(target):
-                    click_xy = _parse_xy(target)
-                elif os.path.isfile(target):
-                    click_xy = self._locate(target, to, find)
-                else:
-                    raise RuntimeError(f"fill field target not found: {target}")
+            if not target:
+                raise RuntimeError(
+                    "Fill field needs a template — capture label + input with 📷, "
+                    "then set Compare (green) and Input zone (blue) in the editor."
+                )
+            if _is_xy(target):
+                click_xy = _parse_xy(target)
+            elif os.path.isfile(target):
+                click_xy = self._locate(target, to, find)
+            else:
+                raise RuntimeError(f"fill field target not found: {target}")
             fill_input_field(text, method=method, confirm_key=confirm, click_xy=click_xy)
             extra = f" + {confirm}" if confirm else ""
             self.log.emit(
@@ -650,9 +678,7 @@ class Runner(QThread):
         cx, cy, cw, ch = _clamp_rect(*meta["compare_rect"], tw0, th0)
         compare_rect = (cx, cy, cw, ch)
         exclude_rects = meta.get("exclude_rects") or []
-        cpx, cpy = meta.get("click_point", [tw0 // 2, th0 // 2])
-        cpx = max(0, min(int(cpx), tw0 - 1))
-        cpy = max(0, min(int(cpy), th0 - 1))
+        cpx, cpy = resolve_template_click(meta, tw0, th0)
 
         compare_bgr = templ[cy:cy + ch, cx:cx + cw]
         compare_gray = cv2.cvtColor(compare_bgr, cv2.COLOR_BGR2GRAY)
@@ -1028,6 +1054,7 @@ class TemplateEditorCanvas(QWidget):
         self._compare = QRect(0, 0, self._img_w, self._img_h)
         self._excludes = []
         self._click = QPoint(self._img_w // 2, self._img_h // 2)
+        self._input_rect = None
         self._scroll_bar = None
         self._origin = None
         self._rubber = QRect()
@@ -1053,6 +1080,13 @@ class TemplateEditorCanvas(QWidget):
         px, py = meta.get("click_point", [self._img_w // 2, self._img_h // 2])
         self._click = QPoint(max(0, min(int(px), self._img_w - 1)),
                              max(0, min(int(py), self._img_h - 1)))
+        ir = meta.get("input_rect")
+        if ir and len(ir) == 4:
+            x, y, w, h = _clamp_rect(*ir, self._img_w, self._img_h)
+            self._input_rect = QRect(x, y, w, h)
+            self._click = QPoint(x + w // 2, y + h // 2)
+        else:
+            self._input_rect = None
         sb = meta.get("scroll_bar_rect")
         if sb and len(sb) == 4:
             x, y, w, h = _clamp_rect(*sb, self._img_w, self._img_h)
@@ -1069,6 +1103,11 @@ class TemplateEditorCanvas(QWidget):
             "exclude_rects": [[r.x(), r.y(), r.width(), r.height()] for r in self._excludes],
             "click_point": [self._click.x(), self._click.y()],
         }
+        if self._input_rect is not None and not self._input_rect.isNull():
+            r = self._input_rect
+            meta["input_rect"] = [r.x(), r.y(), r.width(), r.height()]
+        else:
+            meta["input_rect"] = None
         if self._scroll_bar is not None and not self._scroll_bar.isNull():
             r = self._scroll_bar
             meta["scroll_bar_rect"] = [r.x(), r.y(), r.width(), r.height()]
@@ -1088,6 +1127,17 @@ class TemplateEditorCanvas(QWidget):
     def clear_excludes(self):
         self._excludes.clear()
         self.update()
+
+    def clear_input_zone(self):
+        self._input_rect = None
+        self.update()
+
+    def _auto_exclude_input_value(self, rect):
+        """Changing value inside input — ignore for matching, still clickable."""
+        for ex in self._excludes:
+            if ex.contains(rect.center()):
+                return
+        self._excludes.append(QRect(rect))
 
     def _layout(self):
         scale = min(self.width() / self._img_w, self.height() / self._img_h)
@@ -1124,11 +1174,18 @@ class TemplateEditorCanvas(QWidget):
         target = QRect(int(ox), int(oy), int(dw), int(dh))
         p.drawPixmap(target, self._pix)
 
-        # exclude — красная штриховка
+        # exclude — красная штриховка (ignored when FINDING only)
         for rect in self._excludes:
             dr = self._img_to_disp_rect(rect)
             p.fillRect(dr, QColor(255, 60, 60, 90))
             p.setPen(QPen(QColor("#ff5555"), 2, Qt.DashLine))
+            p.drawRect(dr)
+
+        # input zone — синяя зона (click & type here)
+        if self._input_rect is not None and not self._input_rect.isNull():
+            dr = self._img_to_disp_rect(self._input_rect)
+            p.fillRect(dr, QColor(66, 165, 245, 70))
+            p.setPen(QPen(QColor("#42a5f5"), 2))
             p.drawRect(dr)
 
         # compare — зелёная рамка
@@ -1138,8 +1195,9 @@ class TemplateEditorCanvas(QWidget):
         p.drawRect(dr)
 
         # rubber band while dragging
-        if not self._rubber.isNull() and self._mode in ("compare", "exclude", "scroll"):
-            color = "#ff9800" if self._mode == "scroll" else "#00c8ff"
+        if not self._rubber.isNull() and self._mode in ("compare", "exclude", "scroll", "input"):
+            colors = {"scroll": "#ff9800", "input": "#42a5f5", "exclude": "#ff5555"}
+            color = colors.get(self._mode, "#00c8ff")
             p.setPen(QPen(QColor(color), 2, Qt.DashLine))
             p.drawRect(self._rubber)
 
@@ -1167,20 +1225,21 @@ class TemplateEditorCanvas(QWidget):
             if pt is not None:
                 self._click = pt
                 self._scroll_bar = None
+                self._input_rect = None
                 self.update()
             return
         self._origin = e.pos()
         self._rubber = QRect(self._origin, self._origin)
 
     def mouseMoveEvent(self, e):
-        if self._origin is not None and self._mode in ("compare", "exclude", "scroll"):
+        if self._origin is not None and self._mode in ("compare", "exclude", "scroll", "input"):
             self._rubber = QRect(self._origin, e.pos()).normalized()
             self.update()
 
     def mouseReleaseEvent(self, e):
         if e.button() != Qt.LeftButton or self._origin is None:
             return
-        if self._mode not in ("compare", "exclude", "scroll"):
+        if self._mode not in ("compare", "exclude", "scroll", "input"):
             return
         p1 = self._disp_to_img(self._origin)
         p2 = self._disp_to_img(e.pos())
@@ -1206,6 +1265,14 @@ class TemplateEditorCanvas(QWidget):
             self._scroll_bar = rect
             self._click = QPoint(rect.x() + rect.width() // 2,
                                  rect.y() + rect.height() // 2)
+            self._input_rect = None
+        elif self._mode == "input":
+            self._input_rect = rect
+            self._click = QPoint(rect.x() + rect.width() // 2,
+                                 rect.y() + rect.height() // 2)
+            self._scroll_bar = None
+            if self._purpose == "field":
+                self._auto_exclude_input_value(rect)
         else:
             self._excludes.append(rect)
         self.update()
@@ -1219,10 +1286,14 @@ class TemplateEditorDialog(QDialog):
         self._path = image_path
         self._purpose = purpose
         is_scroll = purpose == "scroll"
-        self.setWindowTitle(
-            "Scroll regions — compare / exclude / scroll bar" if is_scroll
-            else "Template regions — compare / exclude / click"
-        )
+        is_field = purpose == "field"
+        if is_scroll:
+            title = "Scroll regions — compare / exclude / scroll bar"
+        elif is_field:
+            title = "Input field — find / ignore value / type here"
+        else:
+            title = "Template regions — compare / exclude / click"
+        self.setWindowTitle(title)
         self.setMinimumSize(720, 520)
 
         root = QVBoxLayout(self)
@@ -1231,6 +1302,12 @@ class TemplateEditorDialog(QDialog):
                 "<b>Green</b> = stable area to find this panel on screen. "
                 "<b>Red</b> = ignored (changing content). "
                 "<b>Orange</b> = scroll bar / wheel target (drag over the scrollbar)."
+            )
+        elif is_field:
+            hint = QLabel(
+                "<b>Green</b> = stable frame (label, border) — used to FIND the field. "
+                "<b>Red</b> = current value — IGNORED when finding (numbers change). "
+                "<b>Blue</b> = input zone — where to CLICK and TYPE (can overlap red)."
             )
         else:
             hint = QLabel(
@@ -1243,14 +1320,20 @@ class TemplateEditorDialog(QDialog):
 
         modes = QHBoxLayout()
         self._btn_compare = QPushButton("1. Compare (match)")
-        self._btn_exclude = QPushButton("2. Exclude (ignore)")
-        self._btn_click = QPushButton(
-            "3. Scroll bar" if is_scroll else "3. Click point"
+        self._btn_exclude = QPushButton(
+            "2. Value (ignore)" if is_field else "2. Exclude (ignore)"
         )
+        if is_scroll:
+            btn3_label, btn3_mode = "3. Scroll bar", "scroll"
+        elif is_field:
+            btn3_label, btn3_mode = "3. Input zone (type)", "input"
+        else:
+            btn3_label, btn3_mode = "3. Click point", "click"
+        self._btn_click = QPushButton(btn3_label)
         mode_map = (
             (self._btn_compare, "compare"),
             (self._btn_exclude, "exclude"),
-            (self._btn_click, "scroll" if is_scroll else "click"),
+            (self._btn_click, btn3_mode),
         )
         for btn, mode in mode_map:
             btn.setCheckable(True)
@@ -1269,6 +1352,13 @@ class TemplateEditorDialog(QDialog):
                 "Capture a large area, then: Compare = unique stable frame around the list. "
                 "Exclude = changing list items/numbers. Scroll bar = drag a rectangle over "
                 "the vertical scrollbar (wheel events go to its center)."
+            )
+        elif is_field:
+            help_text = (
+                "Capture label + input box together. Compare = stable label/frame. "
+                "Value (ignore) = digits already shown (optional if Input zone covers them). "
+                "Input zone = drag over the editable box — app finds by green, clicks blue, "
+                "types your value. Red areas are NOT used for matching but ARE still clickable."
             )
         else:
             help_text = (
@@ -1290,6 +1380,10 @@ class TemplateEditorDialog(QDialog):
         btn_clear = QPushButton("Clear all excludes")
         btn_clear.clicked.connect(self._canvas.clear_excludes)
         tools.addWidget(btn_clear)
+        if is_field:
+            btn_clear_in = QPushButton("Clear input zone")
+            btn_clear_in.clicked.connect(self._canvas.clear_input_zone)
+            tools.addWidget(btn_clear_in)
         tools.addStretch()
         root.addLayout(tools)
 
@@ -1309,7 +1403,7 @@ class TemplateEditorDialog(QDialog):
         self._canvas.set_mode(mode)
         self._btn_compare.setChecked(mode == "compare")
         self._btn_exclude.setChecked(mode == "exclude")
-        self._btn_click.setChecked(mode in ("click", "scroll"))
+        self._btn_click.setChecked(mode in ("click", "scroll", "input"))
 
     def save_meta(self):
         save_template_meta(self._path, self._canvas.get_meta())
@@ -1400,6 +1494,8 @@ class ImagePreviewDialog(QDialog):
             ck = meta.get("click_point", [])
             sb = meta.get("scroll_bar_rect")
             parts = [f"Compare: {c}", f"Excludes: {n_ex}", f"Wheel: {ck}"]
+            if meta.get("input_rect"):
+                parts.append(f"Input: {meta['input_rect']}")
             if sb:
                 parts.append(f"Scroll bar: {sb}")
             meta_lbl = QLabel("  |  ".join(parts))
@@ -1464,6 +1560,13 @@ class ImagePreviewDialog(QDialog):
             p.fillRect(int(x * sx), int(y * sy), int(w * sx), int(h * sy),
                        QColor(255, 152, 0, 70))
             p.setPen(QPen(QColor("#ff9800"), 2))
+            p.drawRect(int(x * sx), int(y * sy), int(w * sx), int(h * sy))
+        ir = meta.get("input_rect")
+        if ir and len(ir) == 4:
+            x, y, w, h = ir
+            p.fillRect(int(x * sx), int(y * sy), int(w * sx), int(h * sy),
+                       QColor(66, 165, 245, 70))
+            p.setPen(QPen(QColor("#42a5f5"), 2))
             p.drawRect(int(x * sx), int(y * sy), int(w * sx), int(h * sy))
         ck = meta.get("click_point")
         if ck and len(ck) == 2:
@@ -1566,6 +1669,9 @@ class MainWindow(QMainWindow):
         self.move(scr.x() + (scr.width() - w) // 2, scr.y() + (scr.height() - h) // 2)
         self.runner = None
         self._clipboard = []
+        self._playlist_active = False
+        self._playlist_index = -1
+        self._blink_on = False
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -1631,8 +1737,8 @@ class MainWindow(QMainWindow):
         top.addWidget(self.btn_load)
         root.addLayout(top)
 
-        # --- Разделитель: таблица сверху, лог снизу ---
-        splitter = QSplitter(Qt.Vertical)
+        # --- Левая часть: таблица сверху, лог снизу ---
+        left_splitter = QSplitter(Qt.Vertical)
 
         # Таблица шагов
         self.table = QTableWidget(0, 9)
@@ -1672,7 +1778,7 @@ class MainWindow(QMainWindow):
         self.table.horizontalHeaderItem(COL_STOP).setToolTip(
             "Stop scenario on error. Header checkbox toggles ALL rows."
         )
-        splitter.addWidget(self.table)
+        left_splitter.addWidget(self.table)
 
         # Лог
         log_box = QWidget()
@@ -1683,10 +1789,63 @@ class MainWindow(QMainWindow):
         self.log_view.setReadOnly(True)
         self.log_view.setStyleSheet("font-family: Consolas, monospace; font-size: 12px;")
         log_layout.addWidget(self.log_view)
-        splitter.addWidget(log_box)
+        left_splitter.addWidget(log_box)
 
-        splitter.setSizes([400, 250])
-        root.addWidget(splitter)
+        left_splitter.setSizes([400, 250])
+
+        # --- Правая часть: playlist + отдельный лог ---
+        playlist_box = QWidget()
+        playlist_layout = QVBoxLayout(playlist_box)
+        playlist_layout.setContentsMargins(4, 0, 0, 0)
+
+        hdr = QHBoxLayout()
+        hdr.addWidget(QLabel("Program playlist (JSON):"))
+        self.play_state = QLabel()
+        self.play_state.setFixedSize(14, 14)
+        self.play_state.setFrameShape(QFrame.StyledPanel)
+        self.play_state.setToolTip("Idle/Stopped/Running")
+        hdr.addWidget(self.play_state)
+        hdr.addStretch()
+        playlist_layout.addLayout(hdr)
+
+        self.playlist_list = QListWidget()
+        self.playlist_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.playlist_list.setToolTip("Order matters: programs run top → bottom")
+        playlist_layout.addWidget(self.playlist_list, stretch=1)
+
+        row1 = QHBoxLayout()
+        self.btn_pl_add = QPushButton("➕ Add JSON")
+        self.btn_pl_remove = QPushButton("➖ Remove")
+        self.btn_pl_up = QPushButton("↑")
+        self.btn_pl_down = QPushButton("↓")
+        row1.addWidget(self.btn_pl_add)
+        row1.addWidget(self.btn_pl_remove)
+        row1.addWidget(self.btn_pl_up)
+        row1.addWidget(self.btn_pl_down)
+        playlist_layout.addLayout(row1)
+
+        row2 = QHBoxLayout()
+        self.btn_pl_run = QPushButton("▶ Run list")
+        self.btn_pl_stop = QPushButton("⏹ Stop list")
+        self.btn_pl_stop.setEnabled(False)
+        row2.addWidget(self.btn_pl_run)
+        row2.addWidget(self.btn_pl_stop)
+        playlist_layout.addLayout(row2)
+
+        playlist_layout.addWidget(QLabel("Playlist log:"))
+        self.playlist_log_view = QTextEdit()
+        self.playlist_log_view.setReadOnly(True)
+        self.playlist_log_view.setStyleSheet("font-family: Consolas, monospace; font-size: 12px;")
+        playlist_layout.addWidget(self.playlist_log_view, stretch=1)
+
+        # --- Общий сплиттер: слева сценарий, справа плейлист ---
+        main_splitter = QSplitter(Qt.Horizontal)
+        main_splitter.addWidget(left_splitter)
+        main_splitter.addWidget(playlist_box)
+        main_splitter.setStretchFactor(0, 4)
+        main_splitter.setStretchFactor(1, 2)
+        main_splitter.setSizes([980, 420])
+        root.addWidget(main_splitter)
 
         # --- Сигналы ---
         self.btn_add.clicked.connect(lambda: self.add_step())
@@ -1702,12 +1861,23 @@ class MainWindow(QMainWindow):
         self.btn_load.clicked.connect(self.load_scenario)
         self.btn_snip.clicked.connect(self.capture_region)
         self.btn_regions.clicked.connect(self.edit_template_regions)
+        self.btn_pl_add.clicked.connect(self.playlist_add_files)
+        self.btn_pl_remove.clicked.connect(self.playlist_remove_selected)
+        self.btn_pl_up.clicked.connect(lambda: self.playlist_move(-1))
+        self.btn_pl_down.clicked.connect(lambda: self.playlist_move(1))
+        self.btn_pl_run.clicked.connect(self.playlist_run)
+        self.btn_pl_stop.clicked.connect(self.playlist_stop)
 
         # горячая клавиша для захвата области
         QShortcut(QKeySequence("Ctrl+Shift+S"), self, activated=self.capture_region)
         QShortcut(QKeySequence("Ctrl+C"), self.table, activated=self.copy_steps)
         QShortcut(QKeySequence("Ctrl+V"), self.table, activated=self.paste_steps)
         QShortcut(QKeySequence("Insert"), self.table, activated=self.insert_step)
+
+        self._blink_timer = QTimer(self)
+        self._blink_timer.setInterval(450)
+        self._blink_timer.timeout.connect(self._blink_status)
+        self._set_play_state("idle")
 
         if not AUTOMATION_OK:
             self._log(f"⚠ Automation libraries not found: {_IMPORT_ERR}", "err")
@@ -1854,7 +2024,7 @@ class MainWindow(QMainWindow):
             if action == "scroll":
                 img.setPlaceholderText("template png — capture large area, then mark scroll bar")
             elif action == "fill_field":
-                img.setPlaceholderText("field template (capture input) or x,y — optional if prior step clicks")
+                img.setPlaceholderText("capture label+field — then set compare / input zone")
             else:
                 img.setPlaceholderText("path to png (or x,y,w,h for OCR)")
 
@@ -1882,14 +2052,14 @@ class MainWindow(QMainWindow):
             row = self.table.currentRow()
             if row >= 0:
                 action = self.table.cellWidget(row, COL_ACTION).currentData()
-                purpose = "scroll" if action == "scroll" else "template"
+                purpose = _editor_purpose_for_action(action)
             else:
                 purpose = "template"
         dlg = TemplateEditorDialog(path, self, purpose=purpose)
         if dlg.exec() == QDialog.Accepted:
             dlg.save_meta()
-            label = "Scroll regions" if purpose == "scroll" else "Template regions"
-            self._log(f"{label} saved: {os.path.basename(path)}", "ok")
+            labels = {"scroll": "Scroll regions", "field": "Input field regions", "template": "Template regions"}
+            self._log(f"{labels.get(purpose, 'Regions')} saved: {os.path.basename(path)}", "ok")
             return True
         return False
 
@@ -1906,7 +2076,7 @@ class MainWindow(QMainWindow):
         if not path or not os.path.isfile(path):
             self._log("Capture or browse a template image for this step first.", "err")
             return
-        purpose = "scroll" if action == "scroll" else "template"
+        purpose = _editor_purpose_for_action(action)
         self._open_template_editor(path, purpose=purpose)
         img_field = self.table.cellWidget(row, COL_IMAGE)
         if img_field:
@@ -1981,6 +2151,19 @@ class MainWindow(QMainWindow):
             val_field.setText(f"{cx}, {cy}")
             self._log(f"Captured point ({cx}, {cy}) → step {row + 1}", "ok")
 
+        elif action == "fill_field":
+            os.makedirs("templates", exist_ok=True)
+            path = os.path.join("templates", f"tpl_{int(time.time())}.png")
+            img.crop((lx, ly, lx + lw, ly + lh)).save(path)
+            img_field.setText(path)
+            self._log(f"Captured input field → {path} (step {row + 1})", "ok")
+            save_template_meta(path, default_template_meta(lw, lh))
+            self.table.setCurrentCell(row, 0)
+            if self._open_template_editor(path, purpose="field"):
+                img_field.setText(path)
+            else:
+                self._log("Mark compare / value-ignore / input zone with ✏ Regions.", "info")
+
         elif action == "scroll":
             os.makedirs("templates", exist_ok=True)
             path = os.path.join("templates", f"tpl_{int(time.time())}.png")
@@ -2004,7 +2187,7 @@ class MainWindow(QMainWindow):
             img.crop((lx, ly, lx + lw, ly + lh)).save(path)
             img_field.setText(path)
             self._log(f"Captured template → {path} (step {row + 1})", "ok")
-            if action in TEMPLATE_ACTIONS or action == "fill_field":
+            if action in TEMPLATE_ACTIONS:
                 save_template_meta(path, default_template_meta(lw, lh))
                 self.table.setCurrentCell(row, 0)
                 if self._open_template_editor(path):
@@ -2064,6 +2247,138 @@ class MainWindow(QMainWindow):
     def _all_steps(self):
         return [self._row_data(r) for r in range(self.table.rowCount())]
 
+    # ---------- playlist ----------
+
+    def _set_play_state(self, state):
+        # state: idle|running|stopped
+        if state == "running":
+            self._blink_on = True
+            self._blink_timer.start()
+            self.play_state.setToolTip("Playlist running")
+            self.play_state.setStyleSheet("background:#43a047; border-radius:7px; border:1px solid #1b5e20;")
+        elif state == "stopped":
+            self._blink_timer.stop()
+            self.play_state.setToolTip("Playlist stopped")
+            self.play_state.setStyleSheet("background:#e53935; border-radius:7px; border:1px solid #8e0000;")
+        else:
+            self._blink_timer.stop()
+            self.play_state.setToolTip("Playlist idle")
+            self.play_state.setStyleSheet("background:#9e9e9e; border-radius:7px; border:1px solid #555;")
+
+    def _blink_status(self):
+        if not self._playlist_active:
+            return
+        self._blink_on = not self._blink_on
+        color = "#43a047" if self._blink_on else "#2e7d32"
+        self.play_state.setStyleSheet(
+            f"background:{color}; border-radius:7px; border:1px solid #1b5e20;"
+        )
+
+    def _playlist_log(self, text, level="info"):
+        colors = {"info": "#cccccc", "ok": "#4caf50", "err": "#f44336", "skip": "#888888"}
+        ts = time.strftime("%H:%M:%S")
+        color = colors.get(level, "#cccccc")
+        self.playlist_log_view.append(
+            f'<span style="color:#666">{ts}</span> <span style="color:{color}">{text}</span>'
+        )
+
+    def playlist_add_files(self):
+        files, _ = QFileDialog.getOpenFileNames(self, "Add programs to playlist", "", "JSON (*.json)")
+        if not files:
+            return
+        for p in files:
+            item = QListWidgetItem(os.path.basename(p))
+            item.setToolTip(p)
+            item.setData(Qt.UserRole, p)
+            self.playlist_list.addItem(item)
+        self._playlist_log(f"Added {len(files)} program(s).", "ok")
+
+    def playlist_remove_selected(self):
+        rows = sorted({i.row() for i in self.playlist_list.selectedIndexes()}, reverse=True)
+        for r in rows:
+            self.playlist_list.takeItem(r)
+        if rows:
+            self._playlist_log(f"Removed {len(rows)} program(s).", "ok")
+
+    def playlist_move(self, direction):
+        row = self.playlist_list.currentRow()
+        if row < 0:
+            return
+        new_row = row + direction
+        if new_row < 0 or new_row >= self.playlist_list.count():
+            return
+        item = self.playlist_list.takeItem(row)
+        self.playlist_list.insertItem(new_row, item)
+        self.playlist_list.setCurrentRow(new_row)
+
+    def _load_scenario_file(self, path, for_playlist=False):
+        if not path or not os.path.isfile(path):
+            msg = f"Scenario file not found: {path}"
+            self._playlist_log(msg, "err") if for_playlist else self._log(msg, "err")
+            return False
+        try:
+            with open(path, encoding="utf-8") as f:
+                steps = json.load(f)
+        except Exception as e:
+            msg = f"Failed to load scenario {path}: {e}"
+            self._playlist_log(msg, "err") if for_playlist else self._log(msg, "err")
+            return False
+        self.table.setRowCount(0)
+        for st in steps:
+            self.add_step(st)
+        if for_playlist:
+            self._playlist_log(f"Loaded {len(steps)} step(s): {os.path.basename(path)}", "ok")
+        else:
+            self._log(f"Loaded steps: {len(steps)} from {path}", "ok")
+        return True
+
+    def playlist_run(self):
+        if self.runner:
+            self._playlist_log("Runner is already active.", "err")
+            return
+        if self.playlist_list.count() == 0:
+            self._playlist_log("Playlist is empty. Add JSON programs first.", "err")
+            return
+        self._playlist_active = True
+        self._playlist_index = 0
+        self.playlist_log_view.clear()
+        self._playlist_log(f"Starting playlist with {self.playlist_list.count()} program(s).", "info")
+        self.btn_pl_run.setEnabled(False)
+        self.btn_pl_stop.setEnabled(True)
+        self._set_play_state("running")
+        self._run_playlist_item()
+
+    def _run_playlist_item(self):
+        if not self._playlist_active:
+            return
+        if self._playlist_index >= self.playlist_list.count():
+            self._playlist_log("Playlist completed successfully.", "ok")
+            self._playlist_active = False
+            self.btn_pl_run.setEnabled(True)
+            self.btn_pl_stop.setEnabled(False)
+            self._set_play_state("stopped")
+            return
+        item = self.playlist_list.item(self._playlist_index)
+        path = item.data(Qt.UserRole)
+        name = os.path.basename(path) if path else f"item #{self._playlist_index + 1}"
+        if not self._load_scenario_file(path, for_playlist=True):
+            self._playlist_log(f"Skipping invalid scenario: {name}", "err")
+            self._playlist_index += 1
+            self._run_playlist_item()
+            return
+        self._playlist_log(f"Running [{self._playlist_index + 1}/{self.playlist_list.count()}]: {name}", "info")
+        self.run_scenario()
+
+    def playlist_stop(self):
+        self._playlist_active = False
+        self._playlist_index = -1
+        self.btn_pl_run.setEnabled(True)
+        self.btn_pl_stop.setEnabled(False)
+        self._set_play_state("stopped")
+        if self.runner:
+            self.runner.stop()
+        self._playlist_log("Playlist stop requested.", "err")
+
     # ---------- запуск / стоп ----------
 
     def run_scenario(self):
@@ -2086,12 +2401,19 @@ class MainWindow(QMainWindow):
         self.runner.start()
 
     def stop_scenario(self):
+        if self._playlist_active:
+            self.playlist_stop()
+            return
         if self.runner:
             self.runner.stop()
 
     def _on_finished(self):
         self.btn_run.setEnabled(True)
         self.btn_stop.setEnabled(False)
+        if self._playlist_active:
+            self._playlist_log("Program finished.", "ok")
+            self._playlist_index += 1
+            self._run_playlist_item()
 
     # ---------- лог ----------
 
@@ -2116,12 +2438,7 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, "Load scenario", "", "JSON (*.json)")
         if not path:
             return
-        with open(path, encoding="utf-8") as f:
-            steps = json.load(f)
-        self.table.setRowCount(0)
-        for st in steps:
-            self.add_step(st)
-        self._log(f"Loaded steps: {len(steps)} from {path}", "ok")
+        self._load_scenario_file(path, for_playlist=False)
 
 
 if __name__ == "__main__":

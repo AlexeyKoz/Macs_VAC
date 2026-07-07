@@ -36,6 +36,8 @@ folders that are numbered by an auto-incrementing serial number.
 - **File/folder actions** — create, rename, delete, and select folders (with a
   safety guard against deleting drive roots).
 - **Save / load scenarios** as JSON, so each program/workflow is its own file.
+- **Playlist runner (right panel)** — queue multiple scenario JSON files, reorder
+  them, run sequentially, and watch dedicated playlist status/log.
 - **Live color-coded log** (green OK / red error / gray skipped).
 - **Runs in a background thread** so the GUI never freezes; **⏹ Stop** any time.
 - **Degrades gracefully** — the GUI still opens if automation libraries or the
@@ -324,7 +326,8 @@ venv\Scripts\python.exe MACS_Visual_Automation.py
 
 ## How to use
 
-1. **Add steps** with **➕ Step**. Reorder with **↑ / ↓**, remove with **🗑 Delete**.
+1. **Add steps** with **➕ Add** (append) or **➕ Insert** (insert after selected row).
+   You can select multiple rows and use **📋 Copy** / **📋 Paste**.
 2. For each step, pick the **Action** from the dropdown and fill in:
    - **Template / area** — path to a PNG template, or an OCR region as `x,y,w,h`.
    - **Value** — action-specific input (the placeholder shows a hint).
@@ -334,11 +337,18 @@ venv\Scripts\python.exe MACS_Visual_Automation.py
 3. Use **📷 Capture** (`Ctrl+Shift+S`) with a row selected to grab a template,
    an OCR region, or a click point straight from the screen. The **Preview**
    column then shows a thumbnail of the template — click it to view full size.
+   Use **✏ Regions** to edit compare/exclude/click zones for template-based steps.
 4. Set the **Start delay** (seconds to switch to the target window before it
    begins) and the starting **Serial**.
 5. Press **▶ Run**. Watch the **Execution log** at the bottom. Press **⏹ Stop**
    to abort.
 6. **💾 Save** / **📂 Load** your scenario as JSON.
+7. For chained runs, use the **playlist panel on the right**:
+   - **➕ Add JSON** — add one or more scenario files.
+   - **↑ / ↓** — reorder program execution order.
+   - **▶ Run list** / **⏹ Stop list** — start/stop sequential execution.
+   - status indicator: **blinking green** while running, **red** when stopped.
+   - **Playlist log** (below) shows file-level load/run issues separately.
 
 > Safety: `pyautogui`'s fail-safe is **on** — slamming the mouse into a screen
 > corner aborts the run.
@@ -354,8 +364,10 @@ venv\Scripts\python.exe MACS_Visual_Automation.py
 | **Click on coordinates (x,y)** | Click absolute screen coordinates | `450, 300` |
 | **Double-click on coordinates (x,y)** | Double-click absolute coordinates | `450, 300` |
 | **Wait for template to appear** | Wait until the template shows up (no click) | *(not needed)* |
-| **Press key** | Press a single key | `enter` / `tab` / `f5` |
+| **Scroll panel (mouse wheel)** | Find a scroll panel and send wheel events at its scrollbar zone | `down, 5` / `up, 3` |
+| **Press key / shortcut** | Press one key or a hotkey combination | `enter`, `backspace`, `ctrl+a`, `ctrl+shift+s` |
 | **Type text** | Type text (tokens expanded) | text or file path |
+| **Fill input field (clear & type)** | Find input by stable frame, ignore current value, click input zone, then clear/type (or paste) | `847`, `847\|enter`, `paste:847\|enter`, `replace:{serial}` |
 | **Delete on-screen item (Delete key)** | UI delete: presses the **Delete** key on whatever is selected on screen (use right after a click). Optionally confirms a dialog | empty, or `enter` to confirm |
 | **OCR check (search for word)** | OCR the region; pass if the word is present | word, e.g. `pass` |
 | **Verify text & save proof** | OCR + save a PASS/FAIL screenshot into `results\` | keyword, e.g. `pass` |
@@ -375,6 +387,50 @@ venv\Scripts\python.exe MACS_Visual_Automation.py
 - `{date}` — `YYYY-MM-DD`
 - `{time}` — `HHMMSS`
 - `{ts}` — Unix epoch seconds
+
+---
+
+## Reliable input fields (important)
+
+For UI fields where the current number changes (and often contains `-` or masks),
+do **not** rely on double-click + type.
+
+Use **Fill input field (clear & type)** with a captured template and regions:
+
+1. Capture a large area with **label + input box**.
+2. In **✏ Regions**:
+   - **Compare (green):** stable frame/label used to find the field.
+   - **Value (ignore, red):** current value digits (ignored during matching).
+   - **Input zone (blue):** where to click and type/paste.
+3. Set value to `paste:...` for best reliability in masked fields.
+
+Example values:
+
+- `paste:847|enter`
+- `847|enter`
+- `replace:{serial}`
+
+This solves the logical conflict: the changing value is excluded from comparison,
+but the same area is still editable through the dedicated input zone.
+
+---
+
+## Playlist mode (multi-JSON queue)
+
+Use playlist mode when one automation should start another automatically.
+
+1. Save each program as its own JSON file (`💾 Save`).
+2. Add files in the right panel with **➕ Add JSON**.
+3. Reorder queue with **↑ / ↓**.
+4. Click **▶ Run list**.
+
+How it behaves:
+
+- Programs run in top-to-bottom order.
+- Each JSON is loaded into the main table, then executed.
+- If a file fails to load, the error is written to **Playlist log** and queue
+  continues with the next item.
+- **⏹ Stop list** stops the current run and the remaining queue.
 
 ---
 
@@ -434,6 +490,9 @@ Captured templates are stored under `templates\`, and proof/screenshots under
   [Option C.1](#c1-allow-powershell-scripts-only-if-you-use-powershell) above).
 - **"Automation libraries are not installed"** — run
   `pip install -r requirements.txt` (online) or `install_offline.bat` (offline).
+- **Field input sometimes leaves old symbols (`-`, mask chars)** — use
+  **Fill input field** and prefer `paste:...` mode. Configure **Compare / Value
+  ignore / Input zone** in **✏ Regions**.
 - **Offline pip install fails / "no matching distribution"** — Python version on
   the offline PC must match the version used when `download_packages.bat` was
   run (default: 3.14.6). Re-download wheels with the correct version.

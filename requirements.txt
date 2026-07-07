@@ -10,6 +10,7 @@ PySide6>=6.6.0            # Qt 6 bindings (main window, table, overlay)
 
 # --- Screen automation (mouse / keyboard) ---
 pyautogui>=0.9.54         # clicks, key presses, typing
+pyperclip>=1.11.0         # clipboard support for robust paste-based field input
 
 # --- Screen capture (multi-monitor aware) ---
 mss>=9.0.1               # fast full virtual-desktop screenshots
