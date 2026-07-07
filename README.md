@@ -38,6 +38,8 @@ folders that are numbered by an auto-incrementing serial number.
 - **Save / load scenarios** as JSON, so each program/workflow is its own file.
 - **Playlist runner (right panel)** — queue multiple scenario JSON files, reorder
   them, run sequentially, and watch dedicated playlist status/log.
+- **Top menu navigation** — File / View / Help for core actions (open/save,
+  playlist run, toggle playlist panel, open README).
 - **Live color-coded log** (green OK / red error / gray skipped).
 - **Runs in a background thread** so the GUI never freezes; **⏹ Stop** any time.
 - **Degrades gracefully** — the GUI still opens if automation libraries or the
@@ -349,6 +351,11 @@ venv\Scripts\python.exe MACS_Visual_Automation.py
    - **▶ Run list** / **⏹ Stop list** — start/stop sequential execution.
    - status indicator: **blinking green** while running, **red** when stopped.
    - **Playlist log** (below) shows file-level load/run issues separately.
+
+8. Use the top menu for quick navigation:
+   - **File** → Open/Save scenario, Add JSON to playlist, Run playlist, Exit
+   - **View** → Show/Hide playlist panel
+   - **Help** → Open `README.md`
 
 > Safety: `pyautogui`'s fail-safe is **on** — slamming the mouse into a screen
 > corner aborts the run.

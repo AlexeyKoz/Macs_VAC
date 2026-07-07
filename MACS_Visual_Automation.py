@@ -55,7 +55,7 @@ from PySide6.QtWidgets import (
     QStyle, QStyleOptionButton, QStyleOptionHeader,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QRect, QPoint, QTimer
-from PySide6.QtGui import QColor, QImage, QPixmap, QPainter, QPen, QShortcut, QKeySequence
+from PySide6.QtGui import QColor, QImage, QPixmap, QPainter, QPen, QShortcut, QKeySequence, QAction
 
 # --- Автоматизация (импортим мягко, чтобы GUI открылся даже без библиотек) ---
 try:
@@ -1794,8 +1794,8 @@ class MainWindow(QMainWindow):
         left_splitter.setSizes([400, 250])
 
         # --- Правая часть: playlist + отдельный лог ---
-        playlist_box = QWidget()
-        playlist_layout = QVBoxLayout(playlist_box)
+        self.playlist_box = QWidget()
+        playlist_layout = QVBoxLayout(self.playlist_box)
         playlist_layout.setContentsMargins(4, 0, 0, 0)
 
         hdr = QHBoxLayout()
@@ -1839,13 +1839,13 @@ class MainWindow(QMainWindow):
         playlist_layout.addWidget(self.playlist_log_view, stretch=1)
 
         # --- Общий сплиттер: слева сценарий, справа плейлист ---
-        main_splitter = QSplitter(Qt.Horizontal)
-        main_splitter.addWidget(left_splitter)
-        main_splitter.addWidget(playlist_box)
-        main_splitter.setStretchFactor(0, 4)
-        main_splitter.setStretchFactor(1, 2)
-        main_splitter.setSizes([980, 420])
-        root.addWidget(main_splitter)
+        self.main_splitter = QSplitter(Qt.Horizontal)
+        self.main_splitter.addWidget(left_splitter)
+        self.main_splitter.addWidget(self.playlist_box)
+        self.main_splitter.setStretchFactor(0, 4)
+        self.main_splitter.setStretchFactor(1, 2)
+        self.main_splitter.setSizes([980, 420])
+        root.addWidget(self.main_splitter)
 
         # --- Сигналы ---
         self.btn_add.clicked.connect(lambda: self.add_step())
@@ -1878,6 +1878,7 @@ class MainWindow(QMainWindow):
         self._blink_timer.setInterval(450)
         self._blink_timer.timeout.connect(self._blink_status)
         self._set_play_state("idle")
+        self._build_menu()
 
         if not AUTOMATION_OK:
             self._log(f"⚠ Automation libraries not found: {_IMPORT_ERR}", "err")
@@ -2248,6 +2249,69 @@ class MainWindow(QMainWindow):
         return [self._row_data(r) for r in range(self.table.rowCount())]
 
     # ---------- playlist ----------
+
+    def _build_menu(self):
+        bar = self.menuBar()
+
+        m_file = bar.addMenu("&File")
+        a_open = QAction("Open scenario...", self)
+        a_open.setShortcut(QKeySequence("Ctrl+O"))
+        a_open.triggered.connect(self.load_scenario)
+        m_file.addAction(a_open)
+
+        a_save = QAction("Save scenario...", self)
+        a_save.setShortcut(QKeySequence("Ctrl+S"))
+        a_save.triggered.connect(self.save_scenario)
+        m_file.addAction(a_save)
+        m_file.addSeparator()
+
+        a_add_json = QAction("Add JSON to playlist...", self)
+        a_add_json.triggered.connect(self.playlist_add_files)
+        m_file.addAction(a_add_json)
+
+        a_run_list = QAction("Run playlist", self)
+        a_run_list.triggered.connect(self.playlist_run)
+        m_file.addAction(a_run_list)
+        m_file.addSeparator()
+
+        a_exit = QAction("Exit", self)
+        a_exit.setShortcut(QKeySequence("Alt+F4"))
+        a_exit.triggered.connect(self.close)
+        m_file.addAction(a_exit)
+
+        m_view = bar.addMenu("&View")
+        self.act_view_playlist = QAction("Show playlist panel", self)
+        self.act_view_playlist.setCheckable(True)
+        self.act_view_playlist.setChecked(True)
+        self.act_view_playlist.triggered.connect(self.toggle_playlist_panel)
+        m_view.addAction(self.act_view_playlist)
+
+        m_help = bar.addMenu("&Help")
+        a_readme = QAction("Open README", self)
+        a_readme.triggered.connect(self.open_readme)
+        m_help.addAction(a_readme)
+
+    def toggle_playlist_panel(self, checked):
+        if checked:
+            self.playlist_box.show()
+            self.main_splitter.setSizes([980, 420])
+        else:
+            self.playlist_box.hide()
+
+    def open_readme(self):
+        path = os.path.join(os.path.dirname(__file__), "README.md")
+        if not os.path.isfile(path):
+            self._log("README.md not found.", "err")
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(path)
+            else:
+                import webbrowser
+                webbrowser.open(path)
+            self._log("Opened README.md", "ok")
+        except Exception as e:
+            self._log(f"Failed to open README.md: {e}", "err")
 
     def _set_play_state(self, state):
         # state: idle|running|stopped
