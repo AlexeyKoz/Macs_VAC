@@ -90,13 +90,28 @@ if not exist "venv\Scripts\python.exe" (
 
 call venv\Scripts\activate.bat
 
+rem Bootstrap tools first (all from local wheels, no internet).
 python -m pip install --no-index --find-links=offline_packages pip setuptools wheel
+
+rem Install the app requirements from local wheels only.
 python -m pip install --no-index --find-links=offline_packages -r requirements.txt
+if errorlevel 1 (
+    echo.
+    echo First attempt failed - retrying with build isolation disabled
+    echo ^(uses the local setuptools/wheel, still no internet^)...
+    python -m pip install --no-index --no-build-isolation --find-links=offline_packages -r requirements.txt
+)
 
 if errorlevel 1 (
     echo.
     echo INSTALL FAILED.
-    echo Python version on this PC must match %PYTHON_VERSION% ^(same as download PC^).
+    echo   * This PC's Python version MUST match %PYTHON_VERSION%
+    echo     ^(the version used on the download PC^) so the .whl files fit.
+    echo     Check with:  "%PYEXE%" --version
+    echo   * Make sure the whole offline_packages\ folder was copied over.
+    echo   * numpy/pillow wheels are tagged cp314 - a different Python minor
+    echo     version ^(3.12, 3.13, ...^) will be rejected. Re-download on a PC
+    echo     running Python %PYTHON_VERSION%.
     exit /b 1
 )
 

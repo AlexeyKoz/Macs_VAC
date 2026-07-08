@@ -56,8 +56,16 @@ if not exist "venv\Scripts\pip.exe" (
 )
 call venv\Scripts\activate.bat
 python -m pip install --upgrade pip
-pip download -r requirements.txt -d offline_packages
-pip download setuptools wheel pip build -d offline_packages
+
+rem Build/collect WHEELS for everything (converts source .tar.gz to .whl so the
+rem offline PC never has to compile or reach the internet during install).
+python -m pip wheel -r requirements.txt -w offline_packages
+if errorlevel 1 (
+    echo ERROR: Failed to build wheels for requirements.
+    exit /b 1
+)
+rem Bootstrap tools as wheels too (needed to create the venv on the offline PC).
+python -m pip download setuptools wheel pip -d offline_packages
 echo.
 
 rem --- 3) optional Tesseract OCR (for OCR steps only) ---

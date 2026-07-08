@@ -6,3 +6,8 @@ if not exist "venv\Scripts\python.exe" (
     exit /b 1
 )
 venv\Scripts\python.exe MACS_Visual_Automation.py
+if errorlevel 1 (
+    echo.
+    echo The app exited with an error. See the message above.
+    pause
+)
