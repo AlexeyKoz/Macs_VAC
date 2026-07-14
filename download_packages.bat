@@ -17,7 +17,7 @@ if not exist "offline_packages" mkdir "offline_packages"
 if not exist "offline_installers" mkdir "offline_installers"
 
 rem --- 1) Python installer ---
-echo [1/3] Python %PYTHON_VERSION% installer...
+echo [1/4] Python %PYTHON_VERSION% installer...
 if exist "offline_installers\%PYTHON_INSTALLER%" (
     echo       Already downloaded: offline_installers\%PYTHON_INSTALLER%
 ) else (
@@ -34,7 +34,7 @@ if exist "offline_installers\%PYTHON_INSTALLER%" (
 echo.
 
 rem --- 2) pip packages (needs Python already on THIS PC) ---
-echo [2/3] Python packages from requirements.txt...
+echo [2/4] Python packages from requirements.txt...
 where python >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Python is not installed on this PC.
@@ -68,8 +68,27 @@ rem Bootstrap tools as wheels too (needed to create the venv on the offline PC).
 python -m pip download setuptools wheel pip -d offline_packages
 echo.
 
-rem --- 3) optional Tesseract OCR (for OCR steps only) ---
-echo [3/3] Tesseract OCR installer (optional, for OCR steps)...
+rem --- 3) Microsoft Visual C++ Redistributable (REQUIRED by PySide6/Qt6) ---
+echo [3/4] Visual C++ Redistributable (required by Qt)...
+set VCREDIST=vc_redist.x64.exe
+set VCREDIST_URL=https://aka.ms/vs/17/release/vc_redist.x64.exe
+if exist "offline_installers\%VCREDIST%" (
+    echo       Already downloaded: offline_installers\%VCREDIST%
+) else (
+    echo       Downloading VC++ Redistributable ...
+    curl -L -o "offline_installers\%VCREDIST%" "%VCREDIST_URL%"
+    if errorlevel 1 (
+        echo WARNING: VC++ download failed. PySide6 will not import on the
+        echo          offline PC without it. Download manually:
+        echo          %VCREDIST_URL%
+    ) else (
+        echo       Saved: offline_installers\%VCREDIST%
+    )
+)
+echo.
+
+rem --- 4) optional Tesseract OCR (for OCR steps only) ---
+echo [4/4] Tesseract OCR installer (optional, for OCR steps)...
 set TESSERACT_INSTALLER=tesseract-ocr-w64-setup-5.5.0.20241111.exe
 set TESSERACT_URL=https://digi.bib.uni-mannheim.de/tesseract/%TESSERACT_INSTALLER%
 if exist "offline_installers\%TESSERACT_INSTALLER%" (
@@ -88,7 +107,7 @@ if exist "offline_installers\%TESSERACT_INSTALLER%" (
 echo.
 echo ============================================================
 echo  DONE. Copy the ENTIRE project folder to the offline PC:
-echo    - offline_installers\   (Python + Tesseract installers)
+echo    - offline_installers\   (Python + VC++ runtime + Tesseract installers)
 echo    - offline_packages\     (pip wheels)
 echo    - MACS_Visual_Automation.py
 echo    - install_offline.bat

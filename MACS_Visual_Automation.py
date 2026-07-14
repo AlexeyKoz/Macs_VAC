@@ -20,6 +20,7 @@ AutoBuilder — визуальный конструктор автоматиза
 
 import sys
 import os
+import re
 import json
 import time
 import shutil
@@ -365,6 +366,7 @@ ACTIONS = {
     "branch_image":        "IF template found → JSON A else JSON B",
     "branch_text":         "IF word found (OCR) → JSON A else JSON B",
     "branch_verify":       "IF word found → JSON A else JSON B (+ proof screenshot)",
+    "branch_value":        "IF value condition met → A else B (+ proof, A/B may be playlist)",
     "screenshot":          "Screenshot of area",
     "select_target":       "Select folder/file (for next step)",
     "create_folder":       "Create folder",
@@ -390,6 +392,7 @@ VALUE_HINT = {
     "branch_image":        "wayA.json | wayB.json  (empty side = continue)",
     "branch_text":         "word | wayA.json | wayB.json",
     "branch_verify":       "word | wayA.json | wayB.json  (+ saves PASS/FAIL proof)",
+    "branch_value":        "Az ML<=0.1 AND El ML<=0.1 | wayA | wayB  (use ↷ Branch setup)",
     "screenshot":          "name, e.g. unit_{serial}\\log.png",
     "select_target":       "path to select, e.g. results\\unit_{serial}",
     "create_folder":       "path, e.g. results\\unit_{serial}",
@@ -401,8 +404,8 @@ VALUE_HINT = {
 # Колонки таблицы
 COL_ON, COL_ACTION, COL_IMAGE, COL_BROWSE, COL_PREVIEW, COL_VALUE, COL_TIMEOUT, COL_FIND, COL_STOP = range(9)
 
-BRANCH_ACTIONS = frozenset({"branch_image", "branch_text", "branch_verify"})
-MAX_BRANCH_DEPTH = 25
+BRANCH_ACTIONS = frozenset({"branch_image", "branch_text", "branch_verify", "branch_value"})
+MAX_BRANCH_DEPTH = 200
 
 # Подсказки к колонкам таблицы шагов (видны в панели над таблицей + при наведении на заголовок)
 COLUMN_HELP = {
@@ -482,6 +485,178 @@ def format_branch_value(action, keyword, path_a, path_b):
     if action == "branch_image":
         return f"{path_a} | {path_b}"
     return f"{keyword} | {path_a} | {path_b}"
+
+
+# ---------------------------------------------------------------------------
+# Числовые условия для branch_value (например: "Az ML<=0.1 AND El ML<=0.1")
+# ---------------------------------------------------------------------------
+
+# порядок важен: длинные операторы (<=, >=, ==, !=) до одиночных (<, >, =)
+_COND_OPS = ("<=", ">=", "==", "!=", "<", ">", "=")
+_NUMBER_RE = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
+
+
+def _num(text):
+    """'0,09' / '0.09' → float, иначе None."""
+    if text is None:
+        return None
+    try:
+        return float(str(text).replace(",", "."))
+    except ValueError:
+        return None
+
+
+def extract_labeled_number(text, label):
+    """Находит первое число, идущее ПОСЛЕ метки label в тексте OCR.
+
+    Пример: label='Az ML', text='Az ML: [0.0, 35.99] ...' → 0.0
+    Метка ищется без учёта регистра, пробелы внутри метки — «гибкие».
+    """
+    if not text or not label:
+        return None
+    # метку разбиваем по пробелам и разрешаем произвольные разделители между словами
+    words = [re.escape(w) for w in str(label).split()]
+    if not words:
+        return None
+    label_re = re.compile(r"\s*".join(words), re.IGNORECASE)
+    m = label_re.search(text)
+    if not m:
+        return None
+    tail = text[m.end():]
+    num_m = _NUMBER_RE.search(tail)
+    if not num_m:
+        return None
+    return _num(num_m.group(0))
+
+
+def _parse_condition_clause(clause):
+    """'abs(Az ML) <= 0.1' → (label, op, target, use_abs) или None."""
+    clause = clause.strip()
+    if not clause:
+        return None
+    op = None
+    op_pos = -1
+    for candidate in _COND_OPS:
+        pos = clause.find(candidate)
+        if pos != -1:
+            op = candidate
+            op_pos = pos
+            break
+    if op is None:
+        return None
+    label = clause[:op_pos].strip()
+    target = _num(clause[op_pos + len(op):])
+    if target is None:
+        return None
+    use_abs = False
+    low = label.lower()
+    if (low.startswith("abs(") and label.endswith(")")):
+        use_abs = True
+        label = label[4:-1].strip()
+    elif label.startswith("|") and label.endswith("|") and len(label) > 1:
+        use_abs = True
+        label = label[1:-1].strip()
+    if op == "=":
+        op = "=="
+    return (label, op, target, use_abs)
+
+
+def _eval_clause(value, op, target):
+    if value is None:
+        return False
+    if op == "==":
+        return abs(value - target) < 1e-9
+    if op == "!=":
+        return abs(value - target) >= 1e-9
+    if op == "<":
+        return value < target
+    if op == "<=":
+        return value <= target
+    if op == ">":
+        return value > target
+    if op == ">=":
+        return value >= target
+    return False
+
+
+def evaluate_value_condition(expr, text):
+    """Проверяет условие вида 'Az ML<=0.1 AND El ML<=0.1' по OCR-тексту.
+
+    Поддержка: операторы <=, >=, <, >, ==, != (и '=' как ==), abs(...) / |...|,
+    объединение через AND / OR (регистр не важен). OR имеет более низкий приоритет.
+    Возвращает (result: bool, detail: str) — detail показывает разобранные значения.
+    """
+    if not expr or not str(expr).strip():
+        return False, "empty condition"
+    text = text or ""
+    or_groups = re.split(r"\bOR\b", expr, flags=re.IGNORECASE)
+    details = []
+    group_results = []
+    for group in or_groups:
+        clauses = re.split(r"\bAND\b", group, flags=re.IGNORECASE)
+        clause_results = []
+        for raw in clauses:
+            parsed = _parse_condition_clause(raw)
+            if parsed is None:
+                if raw.strip():
+                    details.append(f"{raw.strip()}=?(bad)")
+                    clause_results.append(False)
+                continue
+            label, op, target, use_abs = parsed
+            value = extract_labeled_number(text, label)
+            cmp_value = abs(value) if (use_abs and value is not None) else value
+            ok = _eval_clause(cmp_value, op, target)
+            shown = "n/a" if value is None else (f"|{value:g}|" if use_abs else f"{value:g}")
+            details.append(f"{label}{op}{target:g}→{shown}[{'ok' if ok else 'no'}]")
+            clause_results.append(ok)
+        if clause_results:
+            group_results.append(all(clause_results))
+    result = any(group_results) if group_results else False
+    return result, "; ".join(details)
+
+
+# ---------------------------------------------------------------------------
+# Плейлисты в файле: массив путей к JSON-сценариям (для ветвления в плейлист)
+# ---------------------------------------------------------------------------
+
+def is_playlist_data(data):
+    """True, если JSON-данные — это плейлист (список путей), а не сценарий (список шагов)."""
+    if isinstance(data, dict):
+        return isinstance(data.get("playlist"), list)
+    if isinstance(data, list):
+        if not data:
+            return False
+        # сценарий = список словарей-шагов (в каждом есть 'action')
+        if all(isinstance(x, str) for x in data):
+            return True
+        if all(isinstance(x, dict) for x in data):
+            # плейлист может быть списком {'path': ...} без 'action'
+            if all(("path" in x and "action" not in x) for x in data):
+                return True
+        return False
+    return False
+
+
+def playlist_paths_from_data(data, base_dir):
+    """Разворачивает плейлист-данные в список абсолютных путей к сценариям."""
+    items = []
+    if isinstance(data, dict):
+        items = data.get("playlist", []) or []
+    elif isinstance(data, list):
+        items = data
+    paths = []
+    for it in items:
+        if isinstance(it, str):
+            raw = it
+        elif isinstance(it, dict):
+            raw = it.get("path", "")
+        else:
+            raw = ""
+        raw = str(raw).strip()
+        if not raw:
+            continue
+        paths.append(resolve_scenario_path(raw, base_dir))
+    return paths
 
 
 def resolve_scenario_path(path, base_dir):
@@ -781,9 +956,10 @@ class Runner(QThread):
                 waited += 0.2
             self.log.emit(f"[{i}] ✓ {label} finished", "ok")
 
-        elif a in ("branch_image", "branch_text", "branch_verify"):
+        elif a in ("branch_image", "branch_text", "branch_verify", "branch_value"):
             # Условный переход («узел»): проверяем условие и выбираем JSON-сценарий.
             # Пустой путь на выбранной стороне = продолжаем текущий сценарий.
+            # Выбранная ветка может указывать на плейлист-файл (список сценариев).
             keyword, path_a, path_b = parse_branch_value(a, val)
             if a == "branch_image":
                 if not path_a and not path_b:
@@ -796,6 +972,30 @@ class Runner(QThread):
                 except TimeoutError:
                     found = False
                 cond = "template FOUND" if found else "template NOT found"
+            elif a == "branch_value":
+                # keyword хранит условие, напр. "Az ML<=0.1 AND El ML<=0.1"
+                if not keyword:
+                    raise RuntimeError(
+                        "branch condition is empty — e.g. 'Az ML<=0.1 AND El ML<=0.1' "
+                        "(use ↷ Branch setup button)")
+                if not path_a and not path_b:
+                    raise RuntimeError(
+                        "Configure branch paths: condition | Way A | Way B "
+                        "(use ↷ Branch setup button)")
+                found, detail, _ = self._eval_value_condition(st["image"], keyword, to, find)
+                cond = f"condition {'TRUE' if found else 'FALSE'} [{detail}]"
+                # доказательство (PASS/FAIL) как в branch_verify
+                os.makedirs("results", exist_ok=True)
+                status = "PASS" if found else "FAIL"
+                img, left, top = grab_all()
+                region = self._region_tuple(st["image"])
+                if region:
+                    x, y, w, hh = region
+                    img = img.crop((x - left, y - top, x - left + w, y - top + hh))
+                safe = "".join(c if c.isalnum() else "_" for c in (keyword[:40] or "check"))
+                proof = os.path.join("results", f"{status}_{safe}_{int(time.time())}.png")
+                img.save(proof)
+                self.log.emit(f"[{i}]   proof screenshot → {proof}", "info")
             else:
                 if not keyword:
                     raise RuntimeError("branch keyword is empty")
@@ -1062,6 +1262,24 @@ class Runner(QThread):
         # без find_window — одна проверка (как раньше); с ним — до таймаута
         res = self._search(detect, timeout if find_window else 0, find_window)
         return (res is True), self._last_text
+
+    def _eval_value_condition(self, region_str, expr, timeout, find_window):
+        """OCR-область + проверка числового условия (branch_value).
+
+        Возвращает (result: bool, detail: str, last_text: str).
+        Повторяет чтение до таймаута, пока условие не станет истинным.
+        """
+        self._last_text = ""
+
+        def detect():
+            text = self._ocr(region_str)
+            self._last_text = text
+            ok, _ = evaluate_value_condition(expr, text)
+            return True if ok else None
+
+        res = self._search(detect, timeout if find_window else timeout, find_window)
+        ok, detail = evaluate_value_condition(expr, self._last_text)
+        return (res is True) or ok, detail, self._last_text
 
     def _expand(self, text):
         """Подставляет токены в строку (пути/имена/вводимый текст).
@@ -1821,6 +2039,7 @@ class BranchConfigDialog(QDialog):
             "branch_image": "Branch on template (image found?)",
             "branch_text": "Branch on OCR text (word found?)",
             "branch_verify": "Branch on verify result (word found? + proof)",
+            "branch_value": "Branch on measured value (numeric condition + proof)",
         }
         self.setWindowTitle(titles.get(action, "Configure branch"))
         self.setMinimumWidth(520)
@@ -1843,6 +2062,16 @@ class BranchConfigDialog(QDialog):
                 "• Way A — runs if the keyword IS found (PASS).\n"
                 "• Way B — runs if NOT found (FAIL). Never stops the scenario on its own."
             ),
+            "branch_value": (
+                "Reads NUMBERS in the OCR region (Template/area: x,y,w,h) and checks a condition.\n"
+                "Condition = one or more 'Label OP Value' clauses joined by AND / OR, e.g.:\n"
+                "    Az ML<=0.1 AND El ML<=0.1        (perfect calibration)\n"
+                "    abs(Az ML)<=0.1 AND abs(El ML)<=0.1   (tolerance around 0)\n"
+                "OPs: <=  >=  <  >  ==  !=   |   wrap a label in abs(...) or |...| for |value|.\n"
+                "The first number after each label is read (e.g. 'Az ML: [0.0, 35.99]' → 0.0).\n"
+                "• Way A — runs if the condition is TRUE (PASS).  • Way B — if FALSE (FAIL).\n"
+                "A PASS/FAIL proof screenshot is always saved to results\\."
+            ),
         }
         hint = QLabel(help_text.get(action, ""))
         hint.setWordWrap(True)
@@ -1852,7 +2081,11 @@ class BranchConfigDialog(QDialog):
         keyword, path_a, path_b = parse_branch_value(action, current_value)
 
         self._keyword = QLineEdit(keyword)
-        if action != "branch_image":
+        if action == "branch_value":
+            lay.addWidget(QLabel("Value condition (e.g. Az ML<=0.1 AND El ML<=0.1):"))
+            self._keyword.setPlaceholderText("Az ML<=0.1 AND El ML<=0.1")
+            lay.addWidget(self._keyword)
+        elif action != "branch_image":
             lay.addWidget(QLabel("Keyword to search for:"))
             lay.addWidget(self._keyword)
 
@@ -1876,6 +2109,8 @@ class BranchConfigDialog(QDialog):
 
         note = QLabel(
             "Tip: nested branches work — a branch JSON can contain another branch step.\n"
+            "A Way can point to a PLAYLIST file (JSON array of scenario paths, or "
+            "{\"playlist\": [...]}) — the whole playlist is then driven through in order.\n"
             "Paths are stored relative to the current scenario folder when possible."
         )
         note.setWordWrap(True)
@@ -2020,6 +2255,7 @@ class MainWindow(QMainWindow):
         self._blink_on = False
         self._scenario_path = ""       # путь текущего JSON (для относительных веток)
         self._pending_branch = None    # JSON, на который перейти после текущего прогона
+        self._branch_queue = []        # очередь сценариев из ветки-плейлиста (по порядку)
         self._branch_depth = 0         # защита от бесконечных циклов ветвления
 
         central = QWidget()
@@ -2208,6 +2444,18 @@ class MainWindow(QMainWindow):
         row1.addWidget(self.btn_pl_down)
         playlist_layout.addLayout(row1)
 
+        row_io = QHBoxLayout()
+        self.btn_pl_export = QPushButton("💾 Save list…")
+        self.btn_pl_export.setToolTip(
+            "Save this playlist to a JSON file. Use it as a branch target so a "
+            "branch node drives through the whole playlist."
+        )
+        self.btn_pl_import = QPushButton("📂 Load list…")
+        self.btn_pl_import.setToolTip("Load a playlist file (JSON array of scenario paths).")
+        row_io.addWidget(self.btn_pl_export)
+        row_io.addWidget(self.btn_pl_import)
+        playlist_layout.addLayout(row_io)
+
         row2 = QHBoxLayout()
         self.btn_pl_run = QPushButton("▶ Run list")
         self.btn_pl_stop = QPushButton("⏹ Stop list")
@@ -2256,6 +2504,8 @@ class MainWindow(QMainWindow):
         self.btn_pl_down.clicked.connect(lambda: self.playlist_move(1))
         self.btn_pl_run.clicked.connect(self.playlist_run)
         self.btn_pl_stop.clicked.connect(self.playlist_stop)
+        self.btn_pl_export.clicked.connect(self.playlist_export)
+        self.btn_pl_import.clicked.connect(self.playlist_import)
 
         # горячая клавиша для захвата области
         QShortcut(QKeySequence("Ctrl+Shift+S"), self, activated=self.capture_region)
@@ -2805,6 +3055,56 @@ class MainWindow(QMainWindow):
         if rows:
             self._playlist_log(f"Removed {len(rows)} program(s).", "ok")
 
+    def playlist_export(self):
+        """Сохраняет текущий плейлист в файл (JSON-массив путей) для ветвления-в-плейлист."""
+        if self.playlist_list.count() == 0:
+            self._playlist_log("Playlist is empty — nothing to save.", "err")
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save playlist", "playlist.json", "JSON (*.json)")
+        if not path:
+            return
+        base = os.path.dirname(os.path.abspath(path))
+        paths = []
+        for i in range(self.playlist_list.count()):
+            item = self.playlist_list.item(i)
+            p = item.data(Qt.UserRole)
+            if p:
+                paths.append(path_for_scenario_storage(p, base))
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"playlist": paths}, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self._playlist_log(f"Failed to save playlist: {e}", "err")
+            return
+        self._playlist_log(f"Playlist saved ({len(paths)} program(s)): {os.path.basename(path)}", "ok")
+
+    def playlist_import(self):
+        """Загружает плейлист-файл в панель (заменяет текущий список)."""
+        path, _ = QFileDialog.getOpenFileName(self, "Load playlist", "", "JSON (*.json)")
+        if not path:
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            self._playlist_log(f"Failed to load playlist: {e}", "err")
+            return
+        if not is_playlist_data(data):
+            self._playlist_log(
+                f"'{os.path.basename(path)}' is a scenario, not a playlist. "
+                "Use ➕ Add JSON for single scenarios.", "err")
+            return
+        base = os.path.dirname(os.path.abspath(path))
+        paths = playlist_paths_from_data(data, base)
+        self.playlist_list.clear()
+        for p in paths:
+            item = QListWidgetItem(os.path.basename(p))
+            item.setToolTip(p)
+            item.setData(Qt.UserRole, p)
+            self.playlist_list.addItem(item)
+        self._playlist_log(f"Loaded playlist ({len(paths)} program(s)): {os.path.basename(path)}", "ok")
+
     def playlist_move(self, direction):
         row = self.playlist_list.currentRow()
         if row < 0:
@@ -2828,6 +3128,11 @@ class MainWindow(QMainWindow):
             msg = f"Failed to load scenario {path}: {e}"
             self._playlist_log(msg, "err") if for_playlist else self._log(msg, "err")
             return False
+        if is_playlist_data(steps):
+            msg = (f"'{os.path.basename(path)}' is a playlist file, not a scenario — "
+                   "it can be used as a branch target, but not loaded as steps.")
+            self._playlist_log(msg, "err") if for_playlist else self._log(msg, "err")
+            return False
         self.table.setRowCount(0)
         for st in steps:
             self.add_step(st)
@@ -2848,6 +3153,7 @@ class MainWindow(QMainWindow):
         self._playlist_active = True
         self._playlist_index = 0
         self._branch_depth = 0
+        self._branch_queue = []
         self.playlist_log_view.clear()
         self._playlist_log(f"Starting playlist with {self.playlist_list.count()} program(s).", "info")
         self.btn_pl_run.setEnabled(False)
@@ -2881,6 +3187,7 @@ class MainWindow(QMainWindow):
         self._playlist_active = False
         self._playlist_index = -1
         self._pending_branch = None
+        self._branch_queue = []
         self.btn_pl_run.setEnabled(True)
         self.btn_pl_stop.setEnabled(False)
         self._set_play_state("stopped")
@@ -2897,6 +3204,7 @@ class MainWindow(QMainWindow):
             return
         if not from_branch:
             self._branch_depth = 0
+            self._branch_queue = []
         self.log_view.clear()
         self._log(f"Running scenario: {len(steps)} step(s)", "info")
         scenario_dir = os.path.dirname(self._scenario_path) if self._scenario_path else os.getcwd()
@@ -2919,6 +3227,7 @@ class MainWindow(QMainWindow):
             self.playlist_stop()
             return
         self._pending_branch = None
+        self._branch_queue = []
         if self.runner:
             self.runner.stop()
 
@@ -2926,19 +3235,52 @@ class MainWindow(QMainWindow):
         """Runner попросил условный переход: запомним путь до конца прогона."""
         self._pending_branch = path
 
+    def _expand_branch_target(self, path):
+        """Разворачивает цель ветки в список сценариев.
+
+        Обычный сценарий → [path]. Плейлист-файл (список путей) → все его сценарии
+        по порядку, чтобы ветка «проезжала» по плейлисту, а не грузила один JSON.
+        """
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception as e:
+            self._log(f"Branch target unreadable ({os.path.basename(path)}): {e}", "err")
+            return [path]        # пусть обычная загрузка сообщит об ошибке
+        if is_playlist_data(data):
+            base = os.path.dirname(os.path.abspath(path))
+            paths = playlist_paths_from_data(data, base)
+            if not paths:
+                self._log(f"Playlist '{os.path.basename(path)}' is empty.", "err")
+            else:
+                self._log(
+                    f"↷ Branch into playlist '{os.path.basename(path)}' "
+                    f"— {len(paths)} program(s).", "info")
+                if self._playlist_active:
+                    self._playlist_log(
+                        f"↷ Branch playlist '{os.path.basename(path)}' "
+                        f"({len(paths)} program(s))", "info")
+            return paths
+        return [path]
+
     def _on_finished(self):
         self.btn_run.setEnabled(True)
         self.btn_stop.setEnabled(False)
 
-        # условный переход: грузим выбранный JSON и продолжаем цепочку
+        # ветка выбрала цель: сценарий или плейлист-файл → раскрываем в очередь
         pending, self._pending_branch = self._pending_branch, None
         if pending:
+            self._branch_queue = self._expand_branch_target(pending) + self._branch_queue
+
+        # проезжаем по очереди веток (сценарий за сценарием), затем — по плейлисту
+        while self._branch_queue:
             self._branch_depth += 1
             if self._branch_depth > MAX_BRANCH_DEPTH:
                 self._log(
                     f"Branch chain too deep ({MAX_BRANCH_DEPTH}) — possible loop. Stopping.",
                     "err",
                 )
+                self._branch_queue = []
                 if self._playlist_active:
                     self._playlist_active = False
                     self._playlist_index = -1
@@ -2946,14 +3288,16 @@ class MainWindow(QMainWindow):
                     self.btn_pl_stop.setEnabled(False)
                     self._set_play_state("stopped")
                 return
-            name = os.path.basename(pending)
+            next_path = self._branch_queue.pop(0)
+            name = os.path.basename(next_path)
             if self._playlist_active:
                 self._playlist_log(f"↷ Branch → {name}", "info")
-            if self._load_scenario_file(pending, for_playlist=self._playlist_active):
+            if self._load_scenario_file(next_path, for_playlist=self._playlist_active):
                 self._log(f"↷ Branch: running {name}", "info")
                 self.run_scenario(from_branch=True)
-                return          # плейлист продолжится после конца всей цепочки
-            self._log(f"Branch target failed to load: {pending}", "err")
+                return          # остальное продолжится после конца этого прогона
+            # не удалось загрузить — попробуем следующий в очереди
+            self._log(f"Branch target failed to load: {next_path}", "err")
 
         if self._playlist_active:
             self._playlist_log("Program finished.", "ok")
