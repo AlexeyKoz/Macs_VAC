@@ -69,9 +69,28 @@ from PySide6.QtGui import QColor, QImage, QPixmap, QPainter, QPen, QShortcut, QK
 # ============================================================================
 
 APP_NAME = "MACS Visual Automation"
-APP_VERSION = "1.3"
+APP_VERSION = "1.4"
 
 CHANGELOG = [
+    (
+        "1.4",
+        "2026-08-07",
+        [
+            "The playlist panel now follows the run: when a 'Move to another "
+            "playlist/scenario' (goto) or a branch step hands the run over, the right "
+            "panel switches to a '↷ Jump chain' view listing every scenario the run "
+            "moves through — ▶ marks the one running now, ✓ the ones already done.",
+            "Your own list is never lost: it stays behind the '▣ My list' chip above "
+            "the panel (with its program count), even if it was never saved. One click "
+            "flips between your list and the jump chain; '▶ Run list' and all editing "
+            "always apply to your own list.",
+            "The list also highlights progress while a playlist runs (▶ / ✓), and the "
+            "bar above the steps table says whether you're looking at a playlist "
+            "position or a jump-chain position.",
+            "Fixed: after a single '▶ Run', the engine was never released, so "
+            "'▶ Run list' kept answering 'Runner is already active' until restart.",
+        ],
+    ),
     (
         "1.3",
         "2026-08-07",
@@ -519,7 +538,8 @@ COLUMN_HELP = {
         "• IF gimbal calib CSV OK — branch on Az/El offsets from a calibration CSV.\n"
         "Use ↷ Branch setup to pick Way A / Way B JSON files.\n"
         "• Move to another playlist/scenario — unconditional jump (no A/B, no "
-        "condition): put the target JSON path in Template/area."
+        "condition): put the target JSON path in Template/area. The right panel "
+        "switches to '↷ Jump chain' and follows where the run goes."
     ),
     COL_IMAGE: (
         "TEMPLATE / AREA — the target for this step.\n"
@@ -851,6 +871,37 @@ def path_for_scenario_storage(path, base_dir):
     except ValueError:
         pass
     return abs_p
+
+
+def make_unique_playlist_labels(paths):
+    """Подписи для пунктов плейлиста, различимые даже при одинаковых именах.
+
+    os.path.basename() (или даже basename + один родительский каталог) не
+    отличает файлы с одинаковым именем, если совпадает и имя родительской
+    папки на любую глубину вложенности (например, вложенная копия проекта).
+    Здесь подпись растёт вглубь пути (папка/папка/файл.json, ...) ровно до
+    тех пор, пока не станет уникальной среди РЕАЛЬНО разных файлов; если два
+    пункта физически указывают на один и тот же файл, им закономерно
+    оставляется одинаковая подпись.
+    """
+    norm = [os.path.normpath(os.path.abspath(p)) if p else "" for p in paths]
+    parts = [p.split(os.sep) if p else [] for p in norm]
+    max_depth = max((len(p) for p in parts), default=1) or 1
+    depth = 1
+    labels = [os.sep.join(p[-depth:]) if p else "" for p in parts]
+    while depth < max_depth:
+        groups = {}
+        for i, lbl in enumerate(labels):
+            groups.setdefault(lbl, []).append(i)
+        colliding = [idxs for idxs in groups.values()
+                     if len(idxs) > 1 and len({norm[i] for i in idxs}) > 1]
+        if not colliding:
+            break
+        depth += 1
+        for idxs in colliding:
+            for i in idxs:
+                labels[i] = os.sep.join(parts[i][-depth:])
+    return labels
 
 
 # ============================================================================
@@ -2504,7 +2555,16 @@ class MainWindow(QMainWindow):
         self._pending_branch = None    # JSON, на который перейти после текущего прогона
         self._branch_queue = []        # очередь сценариев из ветки-плейлиста (по порядку)
         self._branch_depth = 0         # защита от бесконечных циклов ветвления
-        self._preview_index = -1       # индекс в playlist_list, чьи шаги сейчас показаны слева
+        self._preview_index = -1       # строка показанного справа списка, чьи шаги видны слева
+        # Правая панель умеет показывать ДВА списка: свой (тот, что запускает
+        # «▶ Run list», в т.ч. несохранённый) и «цепочку переходов» — куда увёл
+        # прогон шаг goto/branch. Переключение — чипами над списком.
+        self._shown_list = "my"        # какой список сейчас в виджете: my|jump
+        self._my_paths_stash = []      # свой список, пока в виджете цепочка переходов
+        self._jump_done = []           # цели переходов, уже отработанные в цепочке
+        self._jump_current = ""        # цель перехода, которая выполняется сейчас
+        self._jump_source = ""         # имя файла, который дал этот переход
+        self._follow_jumps = True      # автоматически показывать цепочку при переходе
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -2697,7 +2757,8 @@ class MainWindow(QMainWindow):
         playlist_layout.setSpacing(6)
 
         hdr = QHBoxLayout()
-        hdr.addWidget(QLabel("Program playlist (JSON):"))
+        self.lbl_list_title = QLabel("Program playlist (JSON):")
+        hdr.addWidget(self.lbl_list_title)
         self.play_state = QLabel()
         self.play_state.setFixedSize(14, 14)
         self.play_state.setFrameShape(QFrame.StyledPanel)
@@ -2706,12 +2767,37 @@ class MainWindow(QMainWindow):
         hdr.addStretch()
         playlist_layout.addLayout(hdr)
 
+        # Чипы-переключатели: свой список ↔ цепочка переходов (goto/branch)
+        chips = QHBoxLayout()
+        chips.setSpacing(6)
+        self.btn_list_my = QPushButton("▣ My list")
+        self.btn_list_my.setCheckable(True)
+        self.btn_list_my.setChecked(True)
+        self.btn_list_my.setToolTip(
+            "Your own playlist — the one '▶ Run list' runs. Kept as-is even when "
+            "a run jumps away, so an unsaved list is never lost."
+        )
+        self.btn_list_jump = QPushButton("↷ Jump chain")
+        self.btn_list_jump.setCheckable(True)
+        self.btn_list_jump.setEnabled(False)
+        self.btn_list_jump.setToolTip(
+            "Where a 'Move to another playlist/scenario' (or branch) step took the "
+            "run: every scenario it moved through, the current one highlighted."
+        )
+        chips.addWidget(self.btn_list_my)
+        chips.addWidget(self.btn_list_jump)
+        chips.addStretch()
+        playlist_layout.addLayout(chips)
+
         self.playlist_list = QListWidget()
         self.playlist_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.playlist_list.setToolTip(
             "Order matters: programs run top → bottom.\n"
             "Click a program to preview its steps on the left "
-            "(◀ Prev / Next ▶ there step through the whole list)."
+            "(◀ Prev / Next ▶ there step through the whole list).\n"
+            "▶ = running now, ✓ = already finished.\n"
+            "When a run jumps elsewhere, the '↷ Jump chain' chip above shows "
+            "where it went; '▣ My list' brings this list back."
         )
         playlist_layout.addWidget(self.playlist_list, stretch=1)
 
@@ -2796,6 +2882,8 @@ class MainWindow(QMainWindow):
         self.btn_pl_export.clicked.connect(self.playlist_export)
         self.btn_pl_import.clicked.connect(self.playlist_import)
         self.playlist_list.itemClicked.connect(self._on_playlist_item_clicked)
+        self.btn_list_my.clicked.connect(self._on_chip_my_list)
+        self.btn_list_jump.clicked.connect(self._on_chip_jump_list)
         self.btn_preview_prev.clicked.connect(lambda: self._preview_step(-1))
         self.btn_preview_next.clicked.connect(lambda: self._preview_step(1))
         self.btn_log_toggle.clicked.connect(
@@ -2815,6 +2903,7 @@ class MainWindow(QMainWindow):
         self._blink_timer.setInterval(450)
         self._blink_timer.timeout.connect(self._blink_status)
         self._set_play_state("idle")
+        self._sync_list_chips()
         self._build_menu()
         # Логи стартуют свёрнутыми, чтобы не «сжимать» остальной интерфейс —
         # разворачиваются кнопкой ▸ Show рядом с заголовком или через View-меню.
@@ -2893,6 +2982,11 @@ class MainWindow(QMainWindow):
         self._log(f"Pasted {len(self._clipboard)} step(s) at row {insert_at + 1}.", "ok")
 
     def _populate_row(self, r, data=None):
+        if data is not None and not isinstance(data, dict):
+            # Защита от повреждённых/неожиданных данных шага (например, если в
+            # JSON затесалась строка вместо объекта шага) — не роняем таблицу.
+            data = None
+
         chk_on = QCheckBox()
         chk_on.setChecked(True if not data else data.get("enabled", True))
         chk_on.stateChanged.connect(self._sync_master_from_rows)
@@ -2902,7 +2996,8 @@ class MainWindow(QMainWindow):
         for key, name in ACTIONS.items():
             combo.addItem(name, key)
         if data:
-            idx = list(ACTIONS).index(data.get("action", "click_image"))
+            action_key = data.get("action", "click_image")
+            idx = list(ACTIONS).index(action_key) if action_key in ACTIONS else 0
             combo.setCurrentIndex(idx)
         self.table.setCellWidget(r, COL_ACTION, combo)
 
@@ -3446,23 +3541,212 @@ class MainWindow(QMainWindow):
             f'<span style="color:#666">{ts}</span> <span style="color:{color}">{text}</span>'
         )
 
+    def _refresh_playlist_labels(self):
+        """Пересчитывает подписи ВСЕХ пунктов плейлиста так, чтобы они были
+        различимы, даже если несколько файлов называются одинаково (частый
+        случай — диалог сохранения сценария всегда предлагает 'scenario.json').
+        Подписи пишутся прямо в текст пункта, поэтому и список, и бар
+        предпросмотра берут уже готовое уникальное имя из item.text()."""
+        count = self.playlist_list.count()
+        paths = [self.playlist_list.item(i).data(Qt.UserRole) for i in range(count)]
+        labels = make_unique_playlist_labels(paths)
+        for i, label in enumerate(labels):
+            item = self.playlist_list.item(i)
+            item.setText(label or item.text())
+
+    # ---------- два списка в правой панели: свой ↔ цепочка переходов ----------
+
+    def _widget_paths(self):
+        """Пути всех пунктов, которые сейчас лежат в виджете списка."""
+        return [self.playlist_list.item(i).data(Qt.UserRole)
+                for i in range(self.playlist_list.count())]
+
+    def _fill_playlist_widget(self, paths):
+        self.playlist_list.clear()
+        for p in paths:
+            item = QListWidgetItem(os.path.basename(p or ""))
+            item.setToolTip(p or "")
+            item.setData(Qt.UserRole, p)
+            self.playlist_list.addItem(item)
+        self._refresh_playlist_labels()
+
+    @staticmethod
+    def _clean_label(text):
+        """Подпись пункта без пометок прогресса (✓ / ▶)."""
+        for prefix in ("✓ ", "▶ "):
+            if text.startswith(prefix):
+                return text[len(prefix):]
+        return text
+
+    def _decorate_progress(self, current_row):
+        """Пометки прогресса прямо в списке: ✓ пройдено, ▶ выполняется сейчас.
+        Вызывать только сразу после _fill_planlist-заливки, иначе префиксы
+        накладываются друг на друга."""
+        if current_row < 0:
+            return
+        for i in range(self.playlist_list.count()):
+            item = self.playlist_list.item(i)
+            if i < current_row:
+                item.setText(f"✓ {item.text()}")
+                item.setForeground(QColor("#7f8a94"))
+            elif i == current_row:
+                item.setText(f"▶ {item.text()}")
+                font = item.font()
+                font.setBold(True)
+                item.setFont(font)
+                item.setForeground(QColor("#4caf50"))
+
+    def _mark_my_list_progress(self, row):
+        """Подсветить, какая программа своего списка идёт прямо сейчас."""
+        self._fill_playlist_widget(self._widget_paths())   # сбрасывает старые пометки
+        self._decorate_progress(row)
+
+    def my_list_paths(self):
+        """Свой список — независимо от того, что показано в виджете сейчас."""
+        if self._shown_list == "jump":
+            return list(self._my_paths_stash)
+        return self._widget_paths()
+
+    def _jump_chain(self):
+        """Цепочка переходов: отработанные + текущий + ещё не запущенные."""
+        chain = list(self._jump_done)
+        if self._jump_current:
+            chain.append(self._jump_current)
+        chain += list(self._branch_queue)
+        return chain
+
+    def _jump_chain_row(self):
+        return len(self._jump_done) if self._jump_current else -1
+
+    def _set_playlist_edit_enabled(self, on):
+        """Правка списка разрешена только когда показан свой список."""
+        for btn in (self.btn_pl_add, self.btn_pl_remove, self.btn_pl_up,
+                    self.btn_pl_down, self.btn_pl_export, self.btn_pl_import):
+            btn.setEnabled(on)
+        if on:
+            self.btn_pl_run.setEnabled(not self._playlist_active and self.runner is None)
+        else:
+            self.btn_pl_run.setEnabled(False)
+
+    def show_my_list(self):
+        """Вернуть в панель свой список (правки и «▶ Run list» — только по нему)."""
+        if self._shown_list == "my":
+            self._set_playlist_edit_enabled(True)
+            self._sync_list_chips()
+            return
+        self._shown_list = "my"
+        self._fill_playlist_widget(self._my_paths_stash)
+        self._my_paths_stash = []
+        self._preview_index = -1
+        self._set_playlist_edit_enabled(True)
+        self._sync_list_chips()
+        self._update_preview_bar()
+
+    def show_jump_list(self):
+        """Показать в панели цепочку переходов и подсветить текущий сценарий."""
+        chain = self._jump_chain()
+        if not chain:
+            return
+        if self._shown_list == "my":
+            self._my_paths_stash = self._widget_paths()
+        self._shown_list = "jump"
+        self._fill_playlist_widget(chain)
+        row = self._jump_chain_row()
+        self._decorate_progress(row)
+        self._set_playlist_edit_enabled(False)
+        self._preview_index = row
+        if row >= 0:
+            self.playlist_list.setCurrentRow(row)
+            self.playlist_list.scrollToItem(self.playlist_list.item(row))
+        self._sync_list_chips()
+        self._update_preview_bar()
+
+    def _reset_jump_chain(self):
+        """Новый прогон — старая цепочка переходов больше не актуальна."""
+        self._jump_done = []
+        self._jump_current = ""
+        self._jump_source = ""
+        self._follow_jumps = True
+        self.show_my_list()
+
+    def _enter_jump_target(self, path):
+        """Прогон ушёл в другой сценарий/плейлист — отражаем это в панели."""
+        if self._jump_current:
+            self._jump_done.append(self._jump_current)
+        self._jump_current = path
+        if self._follow_jumps:
+            self.show_jump_list()
+        else:
+            self._sync_list_chips()
+
+    def _elide(self, text, limit=26):
+        return text if len(text) <= limit else text[:limit - 1] + "…"
+
+    def _sync_list_chips(self):
+        my_count = len(self.my_list_paths())
+        self.btn_list_my.setText(f"▣ My list ({my_count})")
+        chain = self._jump_chain()
+        row = self._jump_chain_row()
+        name = self._jump_source or "Jump chain"
+        if chain:
+            pos = f"{row + 1}/{len(chain)}" if row >= 0 else str(len(chain))
+            self.btn_list_jump.setText(f"↷ {self._elide(name)} ({pos})")
+            self.btn_list_jump.setEnabled(True)
+        else:
+            self.btn_list_jump.setText("↷ Jump chain")
+            self.btn_list_jump.setEnabled(False)
+        for btn, key in ((self.btn_list_my, "my"), (self.btn_list_jump, "jump")):
+            btn.blockSignals(True)
+            btn.setChecked(self._shown_list == key)
+            btn.blockSignals(False)
+        self.lbl_list_title.setText(
+            "Program playlist (JSON):" if self._shown_list == "my"
+            else f"Jump chain — {self._elide(name, 20)}:"
+        )
+
+    def _ensure_my_list_shown(self, what="edit the list"):
+        """Правки всегда применяем к своему списку, даже если панель показывала
+        цепочку переходов (например, команду позвали из меню File)."""
+        if self._shown_list == "my":
+            return
+        self.show_my_list()
+        self._follow_jumps = False
+        self._playlist_log(f"Switched back to your list to {what}.", "info")
+
+    def _on_chip_my_list(self):
+        # ручное переключение на свой список = «не перетаскивай меня обратно»
+        if self._jump_chain():
+            self._follow_jumps = False
+        self.show_my_list()
+
+    def _on_chip_jump_list(self):
+        self._follow_jumps = True
+        self.show_jump_list()
+
     def playlist_add_files(self):
         files, _ = QFileDialog.getOpenFileNames(self, "Add programs to playlist", "", "JSON (*.json)")
         if not files:
             return
+        self._ensure_my_list_shown("add programs")
         for p in files:
             item = QListWidgetItem(os.path.basename(p))
             item.setToolTip(p)
             item.setData(Qt.UserRole, p)
             self.playlist_list.addItem(item)
+        self._refresh_playlist_labels()
         self._playlist_log(f"Added {len(files)} program(s).", "ok")
         self._update_preview_bar()
 
     def playlist_remove_selected(self):
+        if self._shown_list != "my":
+            self._playlist_log(
+                "The jump chain is a read-only view — switch to '▣ My list' to edit.", "err")
+            return
         rows = sorted({i.row() for i in self.playlist_list.selectedIndexes()}, reverse=True)
         for r in rows:
             self.playlist_list.takeItem(r)
         if rows:
+            self._refresh_playlist_labels()
             self._playlist_log(f"Removed {len(rows)} program(s).", "ok")
             if self._preview_index >= self.playlist_list.count():
                 self._preview_index = -1
@@ -3470,7 +3754,8 @@ class MainWindow(QMainWindow):
 
     def playlist_export(self):
         """Сохраняет текущий плейлист в файл (JSON-массив путей) для ветвления-в-плейлист."""
-        if self.playlist_list.count() == 0:
+        my_paths = [p for p in self.my_list_paths() if p]
+        if not my_paths:
             self._playlist_log("Playlist is empty — nothing to save.", "err")
             return
         path, _ = QFileDialog.getSaveFileName(
@@ -3478,12 +3763,7 @@ class MainWindow(QMainWindow):
         if not path:
             return
         base = os.path.dirname(os.path.abspath(path))
-        paths = []
-        for i in range(self.playlist_list.count()):
-            item = self.playlist_list.item(i)
-            p = item.data(Qt.UserRole)
-            if p:
-                paths.append(path_for_scenario_storage(p, base))
+        paths = [path_for_scenario_storage(p, base) for p in my_paths]
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump({"playlist": paths}, f, ensure_ascii=False, indent=2)
@@ -3510,17 +3790,17 @@ class MainWindow(QMainWindow):
             return
         base = os.path.dirname(os.path.abspath(path))
         paths = playlist_paths_from_data(data, base)
-        self.playlist_list.clear()
-        for p in paths:
-            item = QListWidgetItem(os.path.basename(p))
-            item.setToolTip(p)
-            item.setData(Qt.UserRole, p)
-            self.playlist_list.addItem(item)
+        self._ensure_my_list_shown("load a playlist")
+        self._fill_playlist_widget(paths)
         self._preview_index = -1
         self._update_preview_bar()
         self._playlist_log(f"Loaded playlist ({len(paths)} program(s)): {os.path.basename(path)}", "ok")
 
     def playlist_move(self, direction):
+        if self._shown_list != "my":
+            self._playlist_log(
+                "The jump chain is a read-only view — switch to '▣ My list' to reorder.", "err")
+            return
         row = self.playlist_list.currentRow()
         if row < 0:
             return
@@ -3556,7 +3836,7 @@ class MainWindow(QMainWindow):
             return
         item = self.playlist_list.item(row)
         path = item.data(Qt.UserRole)
-        name = os.path.basename(path) if path else item.text()
+        name = self._clean_label(item.text())
         if not path or not os.path.isfile(path):
             self._playlist_log(f"Cannot preview '{name}': file not found.", "err")
             return
@@ -3571,17 +3851,22 @@ class MainWindow(QMainWindow):
         count = self.playlist_list.count()
         if 0 <= self._preview_index < count:
             item = self.playlist_list.item(self._preview_index)
-            path = item.data(Qt.UserRole) or ""
-            name = os.path.basename(path) if path else item.text()
+            where = "in jump chain" if self._shown_list == "jump" else "in playlist"
+            icon = "↷" if self._shown_list == "jump" else "📄"
             self.preview_label.setText(
-                f"📄 {name}   —   [{self._preview_index + 1}/{count} in playlist]"
+                f"{icon} {self._clean_label(item.text())}   —   "
+                f"[{self._preview_index + 1}/{count} {where}]"
             )
+            self.preview_label.setToolTip(item.data(Qt.UserRole) or "")
         elif self._scenario_path:
             self.preview_label.setText(f"📄 {os.path.basename(self._scenario_path)}")
+            self.preview_label.setToolTip(self._scenario_path)
         else:
             self.preview_label.setText("📄 (unsaved scenario)")
+            self.preview_label.setToolTip("")
         self.btn_preview_prev.setEnabled(count > 0)
         self.btn_preview_next.setEnabled(count > 0)
+        self._sync_list_chips()
 
     def _load_scenario_file(self, path, for_playlist=False):
         if not path or not os.path.isfile(path):
@@ -3600,9 +3885,20 @@ class MainWindow(QMainWindow):
                    "it can be used as a branch target, but not loaded as steps.")
             self._playlist_log(msg, "err") if for_playlist else self._log(msg, "err")
             return False
+        if not isinstance(steps, list) or not all(isinstance(st, dict) for st in steps):
+            msg = (f"'{os.path.basename(path)}' has an unexpected/corrupted format "
+                   "(expected a list of step objects) — not loaded.")
+            self._playlist_log(msg, "err") if for_playlist else self._log(msg, "err")
+            return False
         self.table.setRowCount(0)
-        for st in steps:
-            self.add_step(st)
+        try:
+            for st in steps:
+                self.add_step(st)
+        except Exception as e:
+            msg = f"Failed to load steps from '{os.path.basename(path)}': {e}"
+            self._playlist_log(msg, "err") if for_playlist else self._log(msg, "err")
+            self.table.setRowCount(0)
+            return False
         self._scenario_path = os.path.abspath(path)
         if for_playlist:
             self._playlist_log(f"Loaded {len(steps)} step(s): {os.path.basename(path)}", "ok")
@@ -3614,6 +3910,8 @@ class MainWindow(QMainWindow):
         if self.runner:
             self._playlist_log("Runner is already active.", "err")
             return
+        # запускаем всегда СВОЙ список, даже если панель показывает цепочку переходов
+        self._reset_jump_chain()
         if self.playlist_list.count() == 0:
             self._playlist_log("Playlist is empty. Add JSON programs first.", "err")
             return
@@ -3632,23 +3930,29 @@ class MainWindow(QMainWindow):
         if not self._playlist_active:
             return
         self._branch_depth = 0
+        # следующая программа списка — цепочка переходов предыдущей закрыта
+        self._reset_jump_chain()
         if self._playlist_index >= self.playlist_list.count():
             self._playlist_log("Playlist completed successfully.", "ok")
             self._playlist_active = False
+            self._release_runner()
             self.btn_pl_run.setEnabled(True)
             self.btn_pl_stop.setEnabled(False)
             self._set_play_state("stopped")
             return
         item = self.playlist_list.item(self._playlist_index)
         path = item.data(Qt.UserRole)
-        name = os.path.basename(path) if path else f"item #{self._playlist_index + 1}"
+        name = self._clean_label(item.text()) or f"item #{self._playlist_index + 1}"
         if not self._load_scenario_file(path, for_playlist=True):
             self._playlist_log(f"Skipping invalid scenario: {name}", "err")
             self._playlist_index += 1
             self._run_playlist_item()
             return
         self._preview_index = self._playlist_index
+        if self._shown_list == "my":
+            self._mark_my_list_progress(self._playlist_index)
         self.playlist_list.setCurrentRow(self._playlist_index)
+        self.playlist_list.scrollToItem(self.playlist_list.item(self._playlist_index))
         self._update_preview_bar()
         self._playlist_log(f"Running [{self._playlist_index + 1}/{self.playlist_list.count()}]: {name}", "info")
         self.run_scenario()
@@ -3667,14 +3971,27 @@ class MainWindow(QMainWindow):
 
     # ---------- запуск / стоп ----------
 
+    def _release_runner(self):
+        """Отпустить закончившийся поток. Без этого self.runner остаётся занятым
+        навсегда и «▶ Run list» вечно отвечает 'Runner is already active'."""
+        runner, self.runner = self.runner, None
+        if runner is not None:
+            runner.wait(3000)      # run() уже отработал — ждём только выхода потока
+        if self._shown_list == "my":
+            self.btn_pl_run.setEnabled(not self._playlist_active)
+
     def run_scenario(self, from_branch=False):
+        self._release_runner()      # предыдущий прогон уже закончился — отпускаем поток
         steps = self._all_steps()
         if not steps:
             self._log("No steps to execute.", "err")
+            self.btn_run.setEnabled(True)
+            self.btn_stop.setEnabled(False)
             return
         if not from_branch:
             self._branch_depth = 0
             self._branch_queue = []
+            self._reset_jump_chain()
         self.log_view.clear()
         self._log(f"Running scenario: {len(steps)} step(s)", "info")
         scenario_dir = os.path.dirname(self._scenario_path) if self._scenario_path else os.getcwd()
@@ -3690,6 +4007,7 @@ class MainWindow(QMainWindow):
         self.runner.finished_all.connect(self._on_finished)
         self.btn_run.setEnabled(False)
         self.btn_stop.setEnabled(True)
+        self.btn_pl_run.setEnabled(False)
         self.runner.start()
 
     def stop_scenario(self):
@@ -3726,10 +4044,9 @@ class MainWindow(QMainWindow):
                 self._log(
                     f"↷ Branch into playlist '{os.path.basename(path)}' "
                     f"— {len(paths)} program(s).", "info")
-                if self._playlist_active:
-                    self._playlist_log(
-                        f"↷ Branch playlist '{os.path.basename(path)}' "
-                        f"({len(paths)} program(s))", "info")
+                self._playlist_log(
+                    f"↷ Entering playlist '{os.path.basename(path)}' "
+                    f"({len(paths)} program(s))", "info")
             return paths
         return [path]
 
@@ -3741,6 +4058,7 @@ class MainWindow(QMainWindow):
         pending, self._pending_branch = self._pending_branch, None
         if pending:
             self._branch_queue = self._expand_branch_target(pending) + self._branch_queue
+            self._jump_source = os.path.basename(pending)
 
         # проезжаем по очереди веток (сценарий за сценарием), затем — по плейлисту
         while self._branch_queue:
@@ -3754,27 +4072,35 @@ class MainWindow(QMainWindow):
                 if self._playlist_active:
                     self._playlist_active = False
                     self._playlist_index = -1
-                    self.btn_pl_run.setEnabled(True)
                     self.btn_pl_stop.setEnabled(False)
                     self._set_play_state("stopped")
+                self._release_runner()
+                self.btn_pl_run.setEnabled(True)
+                self._sync_list_chips()
                 return
             next_path = self._branch_queue.pop(0)
             name = os.path.basename(next_path)
-            if self._playlist_active:
-                self._playlist_log(f"↷ Branch → {name}", "info")
+            self._playlist_log(f"↷ Moving to → {name}", "info")
             if self._load_scenario_file(next_path, for_playlist=self._playlist_active):
-                self._preview_index = -1   # цель ветки не обязательно пункт плейлиста
-                self._update_preview_bar()
+                # правая панель «едет» вместе с прогоном: цепочка переходов
+                # показывается и подсвечивает сценарий, который пошёл сейчас
+                self._enter_jump_target(next_path)
                 self._log(f"↷ Branch: running {name}", "info")
                 self.run_scenario(from_branch=True)
                 return          # остальное продолжится после конца этого прогона
             # не удалось загрузить — попробуем следующий в очереди
             self._log(f"Branch target failed to load: {next_path}", "err")
+            self._playlist_log(f"Cannot load '{name}' — skipped.", "err")
 
         if self._playlist_active:
             self._playlist_log("Program finished.", "ok")
             self._playlist_index += 1
             self._run_playlist_item()
+            return
+
+        # одиночный прогон (не по списку) закончился — движок свободен
+        self._release_runner()
+        self._sync_list_chips()
 
     # ---------- лог ----------
 
@@ -3828,6 +4154,7 @@ QPushButton {
 }
 QPushButton:hover { background-color: #464c53; border-color: #5c93d6; }
 QPushButton:pressed { background-color: #2f343a; }
+QPushButton:checked { background-color: #35506f; border-color: #5c93d6; color: #ffffff; }
 QPushButton:disabled { background-color: #2b2e31; color: #6a6f74; border-color: #34383c; }
 
 QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox {

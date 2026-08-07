@@ -48,6 +48,11 @@ folders that are numbered by an auto-incrementing serial number.
 - **Unconditional playlist/scenario jump** — the *Move to another playlist/scenario*
   action switches to another JSON as soon as it runs, no condition needed. Useful
   for handing the workflow off to a different playlist once you've reached a result.
+- **The playlist panel follows the run** — as soon as a jump (or a branch) hands the
+  run over, the right panel switches to a **↷ Jump chain** view listing every
+  scenario the run moves through: **▶** marks the one running now, **✓** the ones
+  already finished. Your own list stays one click away behind the **▣ My list**
+  chip — even if it was never saved — and it is what **▶ Run list** always runs.
 - **Playlist preview switcher** — click any program in the playlist panel to load
   its steps into the main table for viewing/editing; a bar above the table shows
   the current file and its position in the playlist, with **◀ Prev / Next ▶**
@@ -675,6 +680,25 @@ playlist]` — with **◀ Prev / Next ▶** buttons next to it.
   highlights the program currently running, so you always know where you are.
 - Clicking a program **loads it exactly like Open/Load** does — it becomes the
   table you're editing, so **💾 Save** saves changes back to that file.
+
+### Two lists in one panel: ▣ My list ↔ ↷ Jump chain
+
+Above the list there are two chips that decide **which list you are looking at**:
+
+- **▣ My list (n)** — the list you built yourself. This is the one **▶ Run list**
+  runs and the only one you can edit, and it is kept even when it was never saved
+  to a file.
+- **↷ Jump chain (k/n)** — where a *Move to another playlist/scenario* (or a
+  branch) step took the run. It lists every scenario the run moves through, in
+  order: **▶** = running right now, **✓** = already finished. If the jump target
+  was a playlist file, all of its programs appear here at once.
+
+The panel switches to the jump chain by itself on every jump, so you can watch the
+run travel; the header and the bar above the steps table say `Jump chain — <file>`
+so it's obvious which list is on screen. Click **▣ My list** to go back to your own
+programs (the run keeps going in the background, and the app stops auto-switching
+until the next run starts). The jump chain is a read-only view — ➕/➖/↑/↓ and
+💾 Save list… always work on your own list, switching back to it if needed.
 
 ---
 
