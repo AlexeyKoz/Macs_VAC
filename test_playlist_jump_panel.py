@@ -35,7 +35,7 @@ for stream in (sys.stdout, sys.stderr):
 
 FAILURES = []
 
-GOOD_STEP = {"enabled": True, "action": "click_xy", "image": "", "value": "1,1",
+GOOD_STEP = {"enabled": True, "action": "pause", "image": "", "value": "1",
              "timeout": 10, "find_window": False, "stop_on_error": True}
 
 

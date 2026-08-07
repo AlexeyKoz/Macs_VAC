@@ -69,13 +69,26 @@ from PySide6.QtGui import QColor, QImage, QPixmap, QPainter, QPen, QShortcut, QK
 # ============================================================================
 
 APP_NAME = "MACS Visual Automation"
-APP_VERSION = "1.4"
+APP_VERSION = "1.5"
 
 CHANGELOG = [
     (
-        "1.4",
+        "1.5",
         "2026-08-07",
         [
+            "Removed the two raw-coordinate actions ('Click on coordinates (x,y)' and "
+            "'Double-click on coordinates (x,y)'): there was no good way to find those "
+            "numbers, and such a step broke as soon as the window moved. Old scenarios "
+            "still load — those steps become 'Click on template' / 'Double-click on "
+            "template' and the log lists which step numbers now need a 📷 Capture.",
+            "New Help → 📖 Full guide (F1): a deep, searchable manual in TWO languages "
+            "(English / Русский) — every action explained with what it really does "
+            "(search scales and match threshold, when Timeout retries and when it does "
+            "not, what each proof file contains), what goes into Template/area and Value, "
+            "and what to watch out for. Also covers the steps table, template capture and "
+            "the regions editor, the playlist and jump chain, tokens/serial numbers and "
+            "troubleshooting. F1 opens straight at the section of the action selected in "
+            "the table, and the language you pick is remembered.",
             "The playlist panel now follows the run: when a 'Move to another "
             "playlist/scenario' (goto) or a branch step hands the run over, the right "
             "panel switches to a '↷ Jump chain' view listing every scenario the run "
@@ -461,8 +474,6 @@ def grab_all():
 ACTIONS = {
     "click_image":         "Click on template",
     "double_click_image":  "Double-click on template",
-    "click_xy":            "Click on coordinates (x,y)",
-    "double_click_xy":     "Double-click on coordinates (x,y)",
     "wait_image":          "Wait for template to appear",
     "scroll":              "Scroll panel (mouse wheel)",
     "key":                 "Press key / shortcut",
@@ -489,8 +500,6 @@ ACTIONS = {
 VALUE_HINT = {
     "click_image":         "(not needed)",
     "double_click_image":  "(not needed)",
-    "click_xy":            "e.g. 450, 300",
-    "double_click_xy":     "e.g. 450, 300",
     "wait_image":          "(not needed)",
     "scroll":              "down, 5  or  up, 3  (wheel clicks)",
     "key":                 "e.g. enter, backspace, ctrl+a, ctrl+shift+s",
@@ -512,6 +521,22 @@ VALUE_HINT = {
     "delete_folder":       "path, or empty = use selected",
     "pause":               "seconds, e.g. 3",
 }
+
+# Действия, убранные из списка (клик по «сырым» координатам x,y: их неоткуда
+# взять, и шаг ломался при любом сдвиге окна). Старые сценарии не роняем: шаг
+# превращается в ближайший по смыслу клик по шаблону, а при загрузке пишем
+# предупреждение — для такого шага нужно снять шаблон.
+RETIRED_ACTIONS = {
+    "click_xy":        ("click_image", "Click on coordinates (x,y)"),
+    "double_click_xy": ("double_click_image", "Double-click on coordinates (x,y)"),
+}
+
+
+def migrate_action(action):
+    """Ключ действия из файла → действующий ключ (учитывая убранные действия)."""
+    if action in RETIRED_ACTIONS:
+        return RETIRED_ACTIONS[action][0]
+    return action
 
 # Колонки таблицы
 COL_ON, COL_ACTION, COL_IMAGE, COL_BROWSE, COL_PREVIEW, COL_VALUE, COL_TIMEOUT, COL_FIND, COL_STOP = range(9)
@@ -1001,16 +1026,6 @@ class Runner(QThread):
         elif a == "wait_image":
             x, y = self._locate(st["image"], to, find)
             self.log.emit(f"[{i}] ✓ {label} — found @ ({x},{y})", "ok")
-
-        elif a == "click_xy":
-            x, y = [int(v) for v in val.replace(" ", "").split(",")]
-            pyautogui.click(x, y)
-            self.log.emit(f"[{i}] ✓ {label} @ ({x},{y})", "ok")
-
-        elif a == "double_click_xy":
-            x, y = [int(v) for v in val.replace(" ", "").split(",")]
-            pyautogui.doubleClick(x, y)
-            self.log.emit(f"[{i}] ✓ {label} @ ({x},{y})", "ok")
 
         elif a == "scroll":
             target = st["image"].strip()
@@ -2272,6 +2287,1233 @@ class ImagePreviewDialog(QDialog):
 
 
 # ============================================================================
+# ПОЛНОЕ РУКОВОДСТВО (Help → Full guide) — два языка: en + ru
+# ----------------------------------------------------------------------------
+# ACTION_DOCS — подробное описание КАЖДОГО действия: что делает (включая детали
+# движка: масштабы поиска, порог совпадения, повторы до таймаута), что писать в
+# Template/area и в Value, и что важно знать. HELP_TOPICS — остальные разделы
+# (интерфейс, шаблоны, плейлист, токены, диагностика). При добавлении действия
+# в ACTIONS добавь его и сюда — диалог собирается из этих данных.
+# ============================================================================
+
+HELP_LANGS = ("en", "ru")
+
+ACTION_DOCS = {
+    "click_image": {
+        "en": {
+            "what": "Finds the picture from Template/area anywhere on your monitors and "
+                    "left-clicks it. The search covers all screens at once (one virtual "
+                    "desktop), compares both grayscale pixels and Canny edges, and tries "
+                    "11 zoom levels from ×0.5 to ×2.0 — so a step keeps working after a "
+                    "DPI change, another resolution or a theme change. A match counts "
+                    "from correlation 0.80.",
+            "target": "PNG template — capture it with 📷 Capture (or … to pick a file).",
+            "value": "Not used.",
+            "note": "The click lands on the template's click point (its centre by default; "
+                    "✏ Regions can move it — an Input zone or Scroll bar region wins over "
+                    "it). The search repeats every 0.4 s until Timeout runs out, then the "
+                    "step fails and the log prints the best score it saw: ~0.7 means the "
+                    "template is nearly right (re-capture it), ~0.2 means it isn't on "
+                    "screen at all.",
+        },
+        "ru": {
+            "title": "Клик по шаблону",
+            "what": "Ищет картинку из Template/area на всех мониторах и делает левый клик "
+                    "по ней. Поиск идёт сразу по всему виртуальному экрану, сравнивает и "
+                    "оттенки серого, и контуры (Canny), и перебирает 11 масштабов от ×0.5 "
+                    "до ×2.0 — поэтому шаг продолжает работать после смены DPI, "
+                    "разрешения или темы. Совпадением считается корреляция от 0.80.",
+            "target": "PNG-шаблон — снимите его кнопкой 📷 Capture (или выберите файл "
+                      "через …).",
+            "value": "Не нужно.",
+            "note": "Клик приходится в точку клика шаблона (по умолчанию центр; сдвигается "
+                    "в ✏ Regions, причём Input zone и Scroll bar имеют приоритет). Поиск "
+                    "повторяется каждые 0.4 с до истечения Timeout, после чего шаг падает, "
+                    "а в лог пишется лучшее совпадение: ~0.7 — шаблон почти подходит "
+                    "(переснимите), ~0.2 — его вообще нет на экране.",
+        },
+    },
+    "double_click_image": {
+        "en": {
+            "what": "Exactly the same search as Click on template, but performs a "
+                    "double-click — for opening files, folders and list items.",
+            "target": "PNG template.",
+            "value": "Not used.",
+        },
+        "ru": {
+            "title": "Двойной клик по шаблону",
+            "what": "Тот же поиск, что и у «Click on template», но выполняется двойной "
+                    "клик — для открытия файлов, папок и элементов списка.",
+            "target": "PNG-шаблон.",
+            "value": "Не нужно.",
+        },
+    },
+    "wait_image": {
+        "en": {
+            "what": "The same search as Click on template, but nothing is clicked: the step "
+                    "simply waits until the picture shows up, and fails if it doesn't "
+                    "appear within Timeout.",
+            "target": "PNG template.",
+            "value": "Not used.",
+            "note": "This is your synchronisation point — put it before steps that must not "
+                    "start too early (wait for a dialog, a progress bar to disappear, a "
+                    "'Done' badge). Much more reliable than guessing with Pause.",
+        },
+        "ru": {
+            "title": "Ожидание шаблона",
+            "what": "Тот же поиск, что и у клика по шаблону, но без клика: шаг просто ждёт "
+                    "появления картинки и падает, если она не появилась за Timeout.",
+            "target": "PNG-шаблон.",
+            "value": "Не нужно.",
+            "note": "Это точка синхронизации — ставьте перед шагами, которые нельзя "
+                    "начинать раньше времени (дождаться диалога, исчезновения прогресса, "
+                    "надписи «Done»). Надёжнее, чем угадывать длину Pause.",
+        },
+    },
+    "scroll": {
+        "en": {
+            "what": "Moves the mouse onto the target, clicks once to give that panel focus, "
+                    "and then sends real mouse-wheel notches (on Windows via "
+                    "MOUSEEVENTF_WHEEL, 120 units each, 40 ms apart). That is why it "
+                    "scrolls panels which ignore synthetic scroll events.",
+            "target": "PNG template of the scrollable panel, or plain x,y coordinates.",
+            "value": "down, 5 / up, 3 / a bare number (positive = down, negative = up). "
+                     "Empty means down, 3.",
+            "note": "Capture a large area that contains the scrollbar and mark the "
+                    "Scroll bar region in ✏ Regions — the wheel is then delivered exactly "
+                    "over the bar. If the panel's content changes between runs, mark the "
+                    "changing parts as Exclude so matching ignores them.",
+        },
+        "ru": {
+            "title": "Прокрутка панели (колесо мыши)",
+            "what": "Наводит мышь на цель, делает один клик (чтобы панель получила фокус) "
+                    "и отправляет настоящие «щелчки» колеса (в Windows через "
+                    "MOUSEEVENTF_WHEEL, по 120 единиц с паузой 40 мс). Именно поэтому "
+                    "прокручиваются даже панели, игнорирующие синтетический скролл.",
+            "target": "PNG-шаблон прокручиваемой панели или координаты x,y.",
+            "value": "down, 5 / up, 3 / просто число (положительное — вниз, отрицательное — "
+                     "вверх). Пусто = down, 3.",
+            "note": "Снимите область побольше, вместе с полосой прокрутки, и отметьте в "
+                    "✏ Regions регион Scroll bar — колесо будет крутиться точно над "
+                    "полосой. Если содержимое панели меняется между прогонами, отметьте "
+                    "меняющиеся части как Exclude.",
+        },
+    },
+    "key": {
+        "en": {
+            "what": "Presses one key or a key combination in the window that currently has "
+                    "focus.",
+            "target": "Not used.",
+            "value": "enter, backspace, ctrl+a, ctrl+shift+s, alt+f4 … Aliases are "
+                     "understood: control/ctl → ctrl, del → delete, bksp/bs → backspace, "
+                     "return → enter, esc → escape, pgup/pgdn, win.",
+        },
+        "ru": {
+            "title": "Нажатие клавиши / сочетания",
+            "what": "Нажимает одну клавишу или сочетание в окне, у которого сейчас фокус.",
+            "target": "Не нужно.",
+            "value": "enter, backspace, ctrl+a, ctrl+shift+s, alt+f4 … Понимаются "
+                     "псевдонимы: control/ctl → ctrl, del → delete, bksp/bs → backspace, "
+                     "return → enter, esc → escape, pgup/pgdn, win.",
+        },
+    },
+    "type_text": {
+        "en": {
+            "what": "Types the text on the keyboard into whatever has focus (about 0.01 s "
+                    "per character). Tokens are expanded first, so a path can be typed "
+                    "straight into a Save dialog.",
+            "target": "Not used.",
+            "value": "The text itself, e.g. results\\unit_{serial}\\report.png. Tokens: "
+                     "{serial} {date} {time} {ts}.",
+            "note": "It does NOT clear the field first — for that use Fill input field.",
+        },
+        "ru": {
+            "title": "Ввод текста",
+            "what": "Печатает текст с клавиатуры туда, где сейчас фокус (примерно 0.01 с на "
+                    "символ). Токены подставляются заранее, поэтому путь можно вводить "
+                    "прямо в диалог сохранения.",
+            "target": "Не нужно.",
+            "value": "Сам текст, например results\\unit_{serial}\\report.png. Токены: "
+                     "{serial} {date} {time} {ts}.",
+            "note": "Поле предварительно НЕ очищается — для этого есть «Fill input field».",
+        },
+    },
+    "fill_field": {
+        "en": {
+            "what": "One step instead of four: click the input field, clear it, type the new "
+                    "value and (optionally) confirm with a key.",
+            "target": "PNG template of the label + field (or x,y). In ✏ Regions put Compare "
+                      "(green) on the stable label and the Input zone (blue) on the box to "
+                      "click — the click goes to the middle of the blue zone.",
+            "value": "[method:]text[|confirm]. Methods: clear (default — Ctrl+A, Backspace, "
+                     "then type), replace (Ctrl+A and type over the selection), paste (via "
+                     "the clipboard: Ctrl+A, Ctrl+V — best for long or non-Latin text; your "
+                     "clipboard is restored afterwards). confirm is any key spec. Examples: "
+                     "847 · paste:847|enter · replace:{serial}|tab.",
+        },
+        "ru": {
+            "title": "Заполнение поля ввода (очистить и напечатать)",
+            "what": "Один шаг вместо четырёх: клик по полю ввода, очистка, ввод нового "
+                    "значения и, если нужно, подтверждение клавишей.",
+            "target": "PNG-шаблон подписи вместе с полем (или x,y). В ✏ Regions отметьте "
+                      "Compare (зелёный) по неизменной подписи и Input zone (синий) по "
+                      "самому полю — клик придётся в центр синей зоны.",
+            "value": "[метод:]текст[|подтверждение]. Методы: clear (по умолчанию — Ctrl+A, "
+                     "Backspace, затем ввод), replace (Ctrl+A и печать поверх выделения), "
+                     "paste (через буфер обмена: Ctrl+A, Ctrl+V — лучший вариант для "
+                     "длинного текста и не-латиницы; буфер потом восстанавливается). "
+                     "Подтверждение — любая клавиша. Примеры: 847 · paste:847|enter · "
+                     "replace:{serial}|tab.",
+        },
+    },
+    "ui_delete": {
+        "en": {
+            "what": "Presses the Delete key, which removes whatever is currently selected "
+                    "inside the OTHER program's interface. Put a Click on template step "
+                    "before it to select the row/file first.",
+            "target": "Not used.",
+            "value": "Empty, or enter / confirm / yes / y / ok — then the step also waits "
+                     "0.6 s and presses Enter to accept the confirmation dialog.",
+            "note": "This never touches your disk by itself. To delete a folder on disk use "
+                    "Delete folder on disk (by path).",
+        },
+        "ru": {
+            "title": "Удаление элемента на экране (клавиша Delete)",
+            "what": "Нажимает Delete — удаляется то, что выделено в интерфейсе ДРУГОЙ "
+                    "программы. Перед этим шагом поставьте клик по шаблону, чтобы выделить "
+                    "нужную строку или файл.",
+            "target": "Не нужно.",
+            "value": "Пусто или enter / confirm / yes / y / ok — тогда шаг ещё подождёт "
+                     "0.6 с и нажмёт Enter, подтверждая диалог.",
+            "note": "Сам по себе диск не трогает. Чтобы удалить папку на диске, есть "
+                    "«Delete folder on disk (by path)».",
+        },
+    },
+    "ocr_check": {
+        "en": {
+            "what": "Reads the text inside the region with the Tesseract OCR engine and "
+                    "fails the step when the word is not there. Before OCR the region is "
+                    "upscaled ×2.5, converted to gray and Otsu-thresholded — that is what "
+                    "makes small UI labels readable. The comparison is a case-insensitive "
+                    "substring match.",
+            "target": "Screen region as x,y,w,h — 📷 Capture fills it in. Empty means the "
+                      "whole virtual screen (slow and noisy).",
+            "value": "The word to find, e.g. pass.",
+            "note": "Important: with Find win OFF the region is read exactly ONCE — Timeout "
+                    "is not used for retries here. Turn Find win ON to keep re-reading "
+                    "until the timeout, or put a Wait for template step in front. Needs "
+                    "the Tesseract engine installed.",
+        },
+        "ru": {
+            "title": "OCR-проверка (поиск слова)",
+            "what": "Читает текст в области движком Tesseract и роняет шаг, если слова "
+                    "там нет. Перед распознаванием область увеличивается в 2.5 раза, "
+                    "переводится в серый и бинаризуется по Оцу — именно поэтому читаются "
+                    "мелкие подписи интерфейса. Сравнение — по подстроке, регистр не важен.",
+            "target": "Область экрана в виде x,y,w,h — заполняется кнопкой 📷 Capture. "
+                      "Пусто = весь виртуальный экран (медленно и много мусора).",
+            "value": "Искомое слово, например pass.",
+            "note": "Важно: при выключенном Find win область читается РОВНО ОДИН раз — "
+                    "Timeout здесь на повторы не влияет. Включите Find win, чтобы читать "
+                    "до таймаута, либо поставьте перед этим шагом «Wait for template». "
+                    "Нужен установленный Tesseract.",
+        },
+    },
+    "verify_text": {
+        "en": {
+            "what": "The same OCR check plus evidence: a PNG of the region is always saved "
+                    "to results\\ as PASS_<word>_<timestamp>.png or FAIL_…, and the step "
+                    "fails when the word is missing.",
+            "target": "Region x,y,w,h (empty = whole screen).",
+            "value": "The keyword you expect, e.g. pass.",
+            "note": "This is the step that turns a scenario into a test report — the proof "
+                    "file is written on both outcomes, so a FAIL is documented too.",
+        },
+        "ru": {
+            "title": "Проверка текста с сохранением доказательства (pass/fail)",
+            "what": "Та же OCR-проверка плюс доказательство: PNG области всегда "
+                    "сохраняется в results\\ под именем PASS_<слово>_<время>.png или "
+                    "FAIL_…, а сам шаг падает, если слова нет.",
+            "target": "Область x,y,w,h (пусто = весь экран).",
+            "value": "Ожидаемое слово, например pass.",
+            "note": "Именно этот шаг превращает сценарий в отчёт о тесте: файл-"
+                    "доказательство пишется при любом исходе, то есть FAIL тоже "
+                    "задокументирован.",
+        },
+    },
+    "screenshot": {
+        "en": {
+            "what": "Saves a picture of the region (or of the whole virtual screen when "
+                    "Template/area is empty). Missing folders are created automatically.",
+            "target": "Region x,y,w,h, or empty for everything.",
+            "value": "File name. Without a folder it goes to results\\; tokens are expanded, "
+                     "so unit_{serial}\\log.png creates a folder per unit.",
+        },
+        "ru": {
+            "title": "Скриншот области",
+            "what": "Сохраняет картинку области (или всего виртуального экрана, если "
+                    "Template/area пусто). Недостающие папки создаются автоматически.",
+            "target": "Область x,y,w,h или пусто — тогда весь экран.",
+            "value": "Имя файла. Без папки файл ляжет в results\\; токены "
+                     "подставляются, поэтому unit_{serial}\\log.png создаёт папку на "
+                     "каждое изделие.",
+        },
+    },
+    "branch_image": {
+        "en": {
+            "what": "Decision node on a picture: if the template IS on screen the run "
+                    "continues with Way A, otherwise with Way B. Once the decision is made "
+                    "the remaining steps of THIS scenario are skipped and the chosen JSON "
+                    "is loaded and run.",
+            "target": "PNG template to look for.",
+            "value": "wayA.json | wayB.json — set it with ↷ Branch setup. An empty side "
+                     "means 'no jump, just continue this scenario'. Relative paths are "
+                     "resolved from the folder of the scenario that contains the step, and "
+                     "a side may point at a whole playlist file, which is then driven "
+                     "through program by program.",
+        },
+        "ru": {
+            "title": "ЕСЛИ шаблон найден → JSON A иначе JSON B",
+            "what": "Узел решения по картинке: если шаблон ЕСТЬ на экране, прогон "
+                    "продолжается путём A, если нет — путём B. После решения оставшиеся "
+                    "шаги ЭТОГО сценария пропускаются, а выбранный JSON загружается и "
+                    "запускается.",
+            "target": "PNG-шаблон, который ищем.",
+            "value": "wayA.json | wayB.json — удобнее задать кнопкой ↷ Branch setup. "
+                     "Пустая сторона означает «никуда не переходить, продолжить этот "
+                     "сценарий». Относительные пути считаются от папки сценария, а сторона "
+                     "может указывать на целый файл-плейлист — тогда он проезжается "
+                     "программа за программой.",
+        },
+    },
+    "branch_text": {
+        "en": {
+            "what": "The same decision, but on text: the region is read with OCR and the "
+                    "keyword decides between Way A (found) and Way B (not found).",
+            "target": "Region x,y,w,h.",
+            "value": "word | wayA.json | wayB.json.",
+            "note": "As with OCR check, the region is read once when Find win is off.",
+        },
+        "ru": {
+            "title": "ЕСЛИ слово найдено (OCR) → JSON A иначе JSON B",
+            "what": "То же решение, но по тексту: область читается через OCR, и слово "
+                    "выбирает путь A (найдено) или B (не найдено).",
+            "target": "Область x,y,w,h.",
+            "value": "слово | wayA.json | wayB.json.",
+            "note": "Как и в «OCR check», при выключенном Find win область читается один "
+                    "раз.",
+        },
+    },
+    "branch_verify": {
+        "en": {
+            "what": "Branch on the word AND save proof: a PASS/FAIL PNG of the region goes "
+                    "to results\\ before the run continues down Way A or Way B. The "
+                    "branching version of Verify text.",
+            "target": "Region x,y,w,h.",
+            "value": "word | wayA.json | wayB.json.",
+        },
+        "ru": {
+            "title": "ЕСЛИ слово найдено → A иначе B (+ скриншот-доказательство)",
+            "what": "Ветвление по слову И сохранение доказательства: PNG области с "
+                    "префиксом PASS/FAIL кладётся в results\\, и только потом прогон идёт "
+                    "путём A или B. Это «Verify text» с ветвлением.",
+            "target": "Область x,y,w,h.",
+            "value": "слово | wayA.json | wayB.json.",
+        },
+    },
+    "branch_value": {
+        "en": {
+            "what": "Branch on numbers read from the screen. The condition names a label, "
+                    "the app finds that label in the OCR text and takes the number next to "
+                    "it. Clauses are joined with AND / OR (OR has the lower priority), "
+                    "operators are <= >= < > == != ('=' means '=='), and abs(...) or "
+                    "|...| compare the absolute value — perfect for a tolerance around "
+                    "zero.",
+            "target": "Region x,y,w,h with the numbers.",
+            "value": "condition | wayA | wayB, e.g. Az ML<=0.1 AND El ML<=0.1 | pass.json | "
+                     "retry.json (use ↷ Branch setup).",
+            "note": "Unlike the text branches this one keeps re-reading until the condition "
+                    "becomes true or Timeout expires, and it always saves a PASS/FAIL proof "
+                    "PNG. The log shows every parsed clause, e.g. 'Az ML<=0.1→0.07[ok]', so "
+                    "a wrong label is easy to spot ('n/a' = the label was not recognised).",
+        },
+        "ru": {
+            "title": "ЕСЛИ числовое условие выполнено → A иначе B (+ доказательство)",
+            "what": "Ветвление по числам с экрана. В условии указывается подпись, "
+                    "программа находит её в OCR-тексте и берёт стоящее рядом число. "
+                    "Условия соединяются через AND / OR (у OR приоритет ниже), операторы "
+                    "<= >= < > == != (одиночное «=» означает «==»), а abs(...) или |...| "
+                    "сравнивают модуль — то, что нужно для допуска вокруг нуля.",
+            "target": "Область x,y,w,h с числами.",
+            "value": "условие | wayA | wayB, например Az ML<=0.1 AND El ML<=0.1 | "
+                     "pass.json | retry.json (удобнее через ↷ Branch setup).",
+            "note": "В отличие от текстовых ветвлений это читает область повторно, пока "
+                    "условие не станет истинным или не выйдет Timeout, и всегда сохраняет "
+                    "PASS/FAIL-доказательство. В лог пишется каждое разобранное условие, "
+                    "например «Az ML<=0.1→0.07[ok]», так что ошибку в подписи видно сразу "
+                    "(«n/a» = подпись не распознана).",
+        },
+    },
+    "branch_calib": {
+        "en": {
+            "what": "Branch on a gimbal calibration CSV instead of the screen. The file is "
+                    "read (columns Azimuth, Elevation and Antenna Gain — or Power Received "
+                    "— are found by name), then the app takes the Az cut (rows whose El is "
+                    "closest to 0) and the El cut (rows whose Az is closest to 0), finds "
+                    "the peak-gain point in each, and uses those two points as the Az/El "
+                    "boresight offsets. Your condition is checked against them.",
+            "target": "Path to the calibration CSV, e.g. calib.csv.",
+            "value": "condition | wayA | wayB, typically abs(Az)<=0.3 AND abs(El)<=0.3 | "
+                     "pass.json | recalibrate.json.",
+            "note": "A PASS/FAIL .txt report with both offsets, their peak gains and point "
+                    "counts is saved to results\\; if '<csv name>_Pattern.png' sits next to "
+                    "the CSV it is copied there too as proof. Point Way B at a "
+                    "recalibration scenario and you have an automatic retry loop.",
+        },
+        "ru": {
+            "title": "ЕСЛИ калибровка гимбала по CSV в норме (Az/El) → A иначе B",
+            "what": "Ветвление не по экрану, а по CSV калибровки гимбала. Файл читается "
+                    "(колонки Azimuth, Elevation и Antenna Gain — либо Power Received — "
+                    "ищутся по названию), затем берётся Az-сечение (строки, где El ближе "
+                    "всего к 0) и El-сечение (строки, где Az ближе всего к 0), в каждом "
+                    "находится точка максимума усиления, и эти две точки считаются "
+                    "смещениями Az/El. По ним и проверяется условие.",
+            "target": "Путь к CSV калибровки, например calib.csv.",
+            "value": "условие | wayA | wayB, обычно abs(Az)<=0.3 AND abs(El)<=0.3 | "
+                     "pass.json | recalibrate.json.",
+            "note": "В results\\ сохраняется отчёт .txt с префиксом PASS/FAIL: оба "
+                    "смещения, усиление в пике и количество точек. Если рядом с CSV лежит "
+                    "«<имя csv>_Pattern.png», он тоже копируется как доказательство. "
+                    "Направьте путь B на сценарий рекалибровки — получится автоматический "
+                    "цикл повторов.",
+        },
+    },
+    "goto_playlist": {
+        "en": {
+            "what": "Unconditional jump — no condition, no Way A/B. The moment this step "
+                    "runs, the remaining steps of the scenario are skipped and the given "
+                    "JSON takes over. If the target is a playlist file, all of its programs "
+                    "run in order.",
+            "target": "Path to a scenario JSON or a playlist JSON. Relative paths are "
+                      "resolved from the current scenario's folder.",
+            "value": "Not used.",
+            "note": "The right panel switches to ↷ Jump chain and follows the run (▶ = "
+                    "running now, ✓ = finished) while ▣ My list keeps your own list "
+                    "untouched. Chains are limited to 200 hops so an accidental loop stops "
+                    "itself instead of running forever.",
+        },
+        "ru": {
+            "title": "Переход в другой плейлист/сценарий",
+            "what": "Безусловный переход — без условия и без путей A/B. Как только шаг "
+                    "выполнился, оставшиеся шаги сценария пропускаются, и управление "
+                    "забирает указанный JSON. Если цель — файл-плейлист, все его "
+                    "программы выполняются по порядку.",
+            "target": "Путь к JSON-сценарию или к JSON-плейлисту. Относительные пути "
+                      "считаются от папки текущего сценария.",
+            "value": "Не нужно.",
+            "note": "Правая панель переключается на ↷ Jump chain и едет вместе с прогоном "
+                    "(▶ — идёт сейчас, ✓ — пройдено), а ваш собственный список остаётся "
+                    "в чипе ▣ My list. Длина цепочки ограничена 200 переходами, поэтому "
+                    "случайный цикл остановится сам.",
+        },
+    },
+    "select_target": {
+        "en": {
+            "what": "Remembers a path inside the runner — nothing happens on disk. The next "
+                    "Rename folder / Delete folder steps use it when their own Value is "
+                    "empty.",
+            "target": "Not used.",
+            "value": "The path to remember, e.g. results\\unit_{serial}.",
+        },
+        "ru": {
+            "title": "Выбор папки/файла (для следующего шага)",
+            "what": "Запоминает путь внутри движка — на диске ничего не происходит. "
+                    "Следующие шаги переименования/удаления берут его, если их "
+                    "собственное Value пусто.",
+            "target": "Не нужно.",
+            "value": "Путь, который надо запомнить, например results\\unit_{serial}.",
+        },
+    },
+    "create_folder": {
+        "en": {
+            "what": "Creates the folder together with its parents (no error if it already "
+                    "exists) and immediately makes it the selected target for the following "
+                    "steps.",
+            "target": "Not used.",
+            "value": "Path, e.g. results\\unit_{serial}.",
+        },
+        "ru": {
+            "title": "Создание папки",
+            "what": "Создаёт папку вместе с родительскими (если уже есть — не ошибка) и "
+                    "сразу делает её выбранной целью для следующих шагов.",
+            "target": "Не нужно.",
+            "value": "Путь, например results\\unit_{serial}.",
+        },
+    },
+    "rename_folder": {
+        "en": {
+            "what": "Renames the selected path, so a Select folder/file or Create folder "
+                    "step must come first. A bare name renames inside the same parent "
+                    "folder; a value that contains folders (or is absolute) moves it there. "
+                    "The renamed path stays selected.",
+            "target": "Not used.",
+            "value": "New name or path, e.g. unit_{serial}_done.",
+        },
+        "ru": {
+            "title": "Переименование папки",
+            "what": "Переименовывает выбранный путь, поэтому перед ним нужен шаг выбора "
+                    "или создания папки. Просто имя — переименование в той же "
+                    "родительской папке; значение с папками (или абсолютное) — перемещение "
+                    "туда. Переименованный путь остаётся выбранным.",
+            "target": "Не нужно.",
+            "value": "Новое имя или путь, например unit_{serial}_done.",
+        },
+    },
+    "delete_folder": {
+        "en": {
+            "what": "Deletes a folder ON DISK, recursively. Refuses to delete a drive root, "
+                    "and fails when the path does not exist or is a file.",
+            "target": "Not used.",
+            "value": "Path to delete, or empty to use the selected target.",
+            "note": "To remove something inside another program's window use Delete "
+                    "on-screen item (Delete key) instead — that one only presses a key.",
+        },
+        "ru": {
+            "title": "Удаление папки на диске (по пути)",
+            "what": "Удаляет папку НА ДИСКЕ вместе с содержимым. Отказывается удалять "
+                    "корень диска и падает, если путь не существует или это файл.",
+            "target": "Не нужно.",
+            "value": "Путь для удаления или пусто — тогда берётся выбранная цель.",
+            "note": "Чтобы удалить что-то внутри чужого окна, используйте «Delete "
+                    "on-screen item (Delete key)» — тот шаг просто жмёт клавишу.",
+        },
+    },
+    "pause": {
+        "en": {
+            "what": "Waits the given number of seconds. The wait is checked every 0.2 s, so "
+                    "⏹ Stop reacts immediately instead of after the whole pause.",
+            "target": "Not used.",
+            "value": "Seconds, e.g. 3. Empty = 1.",
+            "note": "Prefer Wait for template when you are waiting for something specific — "
+                    "a fixed pause is either too short on a slow day or wasted time on a "
+                    "fast one.",
+        },
+        "ru": {
+            "title": "Пауза (секунды)",
+            "what": "Ждёт заданное число секунд. Ожидание проверяется каждые 0.2 с, "
+                    "поэтому ⏹ Stop срабатывает сразу, а не после конца паузы.",
+            "target": "Не нужно.",
+            "value": "Секунды, например 3. Пусто = 1.",
+            "note": "Если вы ждёте конкретное событие, лучше «Wait for template»: "
+                    "фиксированная пауза либо окажется короткой в медленный день, либо "
+                    "будет тратить время в быстрый.",
+        },
+    },
+}
+
+# Действия, сгруппированные по разделам справки (порядок = порядок в диалоге).
+HELP_ACTION_GROUPS = {
+    "act_input": ["click_image", "double_click_image", "wait_image", "scroll", "key",
+                  "type_text", "fill_field", "ui_delete"],
+    "act_ocr": ["ocr_check", "verify_text", "screenshot"],
+    "act_flow": ["branch_image", "branch_text", "branch_verify", "branch_value",
+                 "branch_calib", "goto_playlist"],
+    "act_files": ["select_target", "create_folder", "rename_folder", "delete_folder",
+                  "pause"],
+}
+
+HELP_FIELD_LABELS = {
+    "en": {"what": "What it does", "target": "Template / area", "value": "Value",
+           "note": "Good to know"},
+    "ru": {"what": "Что делает", "target": "Template / area", "value": "Value",
+           "note": "Важно знать"},
+}
+
+
+def help_action_topic_key(action):
+    """Раздел справки, в котором описано данное действие."""
+    for topic, actions in HELP_ACTION_GROUPS.items():
+        if action in actions:
+            return topic
+    return "start"
+
+
+def help_escape(text):
+    """Описания действий — обычный текст, а не разметка: '<=' и '<word>' должны
+    доехать до экрана, а не быть съеденными как HTML-тег."""
+    return (str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def help_actions_html(topic_key, lang):
+    """Собирает карточки действий раздела: заголовок + поля описания."""
+    parts = []
+    for action in HELP_ACTION_GROUPS.get(topic_key, []):
+        doc = ACTION_DOCS.get(action, {}).get(lang, {})
+        parts.append(
+            "<h3 style='color:#5c93d6; margin:16px 0 2px 0;'>"
+            f"{help_escape(ACTIONS[action])}</h3>")
+        subtitle = doc.get("title")
+        tail = f" — {help_escape(subtitle)}" if subtitle else ""
+        parts.append(
+            "<p style='margin:0 0 8px 0; color:#7f8a94;'>"
+            f"<code>{action}</code>{tail}</p>")
+        for field in ("what", "target", "value", "note"):
+            text = doc.get(field)
+            if text:
+                parts.append(
+                    "<p style='margin:0 0 6px 0;'>"
+                    f"<b style='color:#cfd6dc;'>{HELP_FIELD_LABELS[lang][field]}:</b> "
+                    f"{help_escape(text)}</p>")
+    return "".join(parts)
+
+
+HELP_TOPICS = [
+    {
+        "key": "start",
+        "title": {"en": "1. Getting started", "ru": "1. Быстрый старт"},
+        "body": {
+            "en": """
+<p>A scenario is a <b>list of steps</b>, top to bottom. Each row is one action performed
+on <i>another</i> program's window — a click, a keystroke, an OCR check, a file
+operation. Nothing is scripted: you capture what you see on screen and pick what to do
+with it.</p>
+
+<h3>How a run works</h3>
+<ul>
+<li><b>▶ Run</b> waits <b>Start delay</b> seconds first, so you can bring the target
+window to the front, and then executes the rows in order.</li>
+<li>The <b>Execution log</b> (left, expand it with ▸ Show) reports every step with its
+result, coordinates and file paths.</li>
+<li><b>⏹ Stop</b> interrupts the run at the next check point — a Pause is checked every
+0.2 s, a search every 0.4 s.</li>
+<li>A step that errors either halts the run or is skipped, depending on its <b>Stop</b>
+checkbox.</li>
+</ul>
+
+<h3>Building a step</h3>
+<ul>
+<li><b>➕ Add</b> appends a row, <b>➕ Insert</b> puts one after the selected row; ↑ ↓
+reorder; <b>📋 Copy / 📋 Paste</b> (Ctrl+C / Ctrl+V) duplicate steps.</li>
+<li>Pick the <b>Action</b>, then press <b>📷 Capture</b> (Ctrl+Shift+S) and drag a
+rectangle over the target. For image actions a PNG is saved into <code>templates\\</code>
+and its path goes into Template/area; for OCR/screenshot actions the region is written as
+<code>x,y,w,h</code> instead.</li>
+<li>Fill <b>Value</b> if the action needs one — the placeholder text in the cell always
+shows the expected format.</li>
+</ul>
+
+<h3>Files</h3>
+<p><b>💾 Save</b> writes the scenario as a JSON file — one file per program or workflow —
+and <b>📂 Load</b> opens it again. Templates are PNG files with a small
+<code>.meta.json</code> next to them. Everything is plain data, so the whole folder can be
+copied to another PC. The <b>playlist</b> on the right chains those scenario files
+together.</p>
+""",
+            "ru": """
+<p>Сценарий — это <b>список шагов</b> сверху вниз. Каждая строка — одно действие над
+окном <i>другой</i> программы: клик, нажатие клавиш, OCR-проверка, операция с файлами.
+Ничего программировать не нужно: вы снимаете то, что видите на экране, и выбираете, что с
+этим сделать.</p>
+
+<h3>Как идёт прогон</h3>
+<ul>
+<li><b>▶ Run</b> сначала ждёт <b>Start delay</b> секунд, чтобы вы успели вывести нужное
+окно на передний план, а затем выполняет строки по порядку.</li>
+<li><b>Execution log</b> (слева, раскрывается кнопкой ▸ Show) пишет каждый шаг: результат,
+координаты, пути к файлам.</li>
+<li><b>⏹ Stop</b> прерывает прогон на ближайшей проверке — пауза проверяется каждые
+0.2 с, поиск — каждые 0.4 с.</li>
+<li>Упавший шаг либо останавливает прогон, либо пропускается — в зависимости от галочки
+<b>Stop</b> в его строке.</li>
+</ul>
+
+<h3>Как собрать шаг</h3>
+<ul>
+<li><b>➕ Add</b> добавляет строку в конец, <b>➕ Insert</b> — после выделенной; ↑ ↓
+меняют порядок; <b>📋 Copy / 📋 Paste</b> (Ctrl+C / Ctrl+V) копируют шаги.</li>
+<li>Выберите <b>Action</b>, нажмите <b>📷 Capture</b> (Ctrl+Shift+S) и обведите цель
+мышью. Для действий с картинками PNG сохранится в <code>templates\\</code>, а путь
+подставится в Template/area; для OCR и скриншотов вместо пути запишется область
+<code>x,y,w,h</code>.</li>
+<li>Заполните <b>Value</b>, если действие его требует — подсказка в самой ячейке всегда
+показывает ожидаемый формат.</li>
+</ul>
+
+<h3>Файлы</h3>
+<p><b>💾 Save</b> сохраняет сценарий в JSON — один файл на программу или процесс, а
+<b>📂 Load</b> открывает его снова. Шаблоны — это PNG плюс небольшой
+<code>.meta.json</code> рядом. Всё хранится в открытых данных, поэтому папку можно целиком
+перенести на другой компьютер. <b>Плейлист</b> справа связывает такие файлы в
+последовательность.</p>
+""",
+        },
+    },
+    {
+        "key": "columns",
+        "title": {"en": "2. The steps table", "ru": "2. Таблица шагов"},
+        "body": {
+            "en": """
+<ul>
+<li><b>On</b> — enable/disable the step. Disabled rows are skipped and logged as skipped.
+The checkbox in the header toggles every row at once.</li>
+<li><b>Action</b> — what the step does (see the Actions sections).</li>
+<li><b>Template / area</b> — the target: a path to a PNG template, a region
+<code>x,y,w,h</code>, a CSV path (calibration branch) or a JSON path (jump step).</li>
+<li><b>…</b> — pick a template file from disk instead of capturing it.</li>
+<li><b>Preview</b> — thumbnail of the template so rows are easy to tell apart; click it to
+open the picture full size with its regions drawn on top.</li>
+<li><b>Value</b> — the action-specific input. Tokens <code>{serial} {date} {time}
+{ts}</code> are expanded at run time.</li>
+<li><b>Timeout</b> — how many seconds a search may keep retrying before the step fails
+(and the length of a Pause).</li>
+<li><b>Find win</b> — see below. Off by default; the header checkbox toggles all rows.</li>
+<li><b>Stop</b> — if this step errors, stop the whole scenario. Unchecked means the run
+continues with the next step. The header checkbox toggles all rows.</li>
+</ul>
+
+<h3>What Timeout really affects</h3>
+<p>Template searches (click / double-click / wait / scroll / fill field) retry every 0.4 s
+until Timeout. <b>OCR check</b> and the <b>word branches</b> read the region only
+<i>once</i> when Find win is off — Timeout does not add retries there. The
+<b>value condition branch</b> always retries until Timeout. <b>Pause</b> uses Timeout's
+neighbour, its own Value, as the number of seconds.</p>
+
+<h3>What Find win really does</h3>
+<p>It is a last resort for targets that are not visible: the app minimises <i>all</i>
+windows (including its own), looks at the bare desktop, then brings windows to the front
+<b>one at a time</b> and re-checks after each one, until the target is found or Timeout
+expires. Own windows are restored at the end. It needs the <code>pygetwindow</code>
+package, it is slow, and it steals focus — but it also turns OCR steps into
+retry-until-timeout steps, which is sometimes exactly what you want.</p>
+
+<p>Hover any column header to get its short description in the guide bar above the table,
+or press <b>Show all columns</b> for the full list.</p>
+""",
+            "ru": """
+<ul>
+<li><b>On</b> — включить/выключить шаг. Выключенные строки пропускаются и отмечаются в
+логе. Галочка в заголовке переключает все строки сразу.</li>
+<li><b>Action</b> — что делает шаг (см. разделы про действия).</li>
+<li><b>Template / area</b> — цель шага: путь к PNG-шаблону, область <code>x,y,w,h</code>,
+путь к CSV (калибровочное ветвление) или путь к JSON (шаг перехода).</li>
+<li><b>…</b> — выбрать файл шаблона с диска вместо съёмки с экрана.</li>
+<li><b>Preview</b> — миниатюра шаблона, чтобы строки было легко различать; по клику
+картинка открывается в полном размере с нарисованными регионами.</li>
+<li><b>Value</b> — данные, специфичные для действия. Токены <code>{serial} {date} {time}
+{ts}</code> подставляются во время прогона.</li>
+<li><b>Timeout</b> — сколько секунд поиск может повторяться, прежде чем шаг упадёт (а
+также длина паузы).</li>
+<li><b>Find win</b> — см. ниже. По умолчанию выключено; галочка в заголовке переключает
+все строки.</li>
+<li><b>Stop</b> — если шаг упал, остановить весь сценарий. Без галочки прогон продолжится
+со следующего шага. Заголовок переключает все строки.</li>
+</ul>
+
+<h3>На что реально влияет Timeout</h3>
+<p>Поиск шаблонов (клик, двойной клик, ожидание, прокрутка, заполнение поля) повторяется
+каждые 0.4 с до истечения Timeout. <b>OCR-проверка</b> и <b>ветвления по слову</b> при
+выключенном Find win читают область только <i>один раз</i> — Timeout повторов не даёт.
+<b>Ветвление по числовому условию</b> повторяет чтение до таймаута всегда. У <b>Pause</b>
+длительность берётся не из Timeout, а из его собственного Value.</p>
+
+<h3>Что реально делает Find win</h3>
+<p>Это крайняя мера для целей, которых не видно: программа сворачивает <i>все</i> окна
+(включая своё), проверяет пустой рабочий стол, а затем выводит окна на передний план
+<b>по одному</b>, каждый раз проверяя заново — пока цель не найдётся или не выйдет
+Timeout. В конце свои окна возвращаются. Нужен пакет <code>pygetwindow</code>, работает
+медленно и забирает фокус — зато превращает OCR-шаги в шаги «повторять до таймаута», что
+иногда как раз и требуется.</p>
+
+<p>Наведите курсор на заголовок любой колонки — краткое описание появится в полосе над
+таблицей; кнопка <b>Show all columns</b> покажет весь список сразу.</p>
+""",
+        },
+    },
+    {
+        "key": "act_input",
+        "title": {"en": "3. Actions — mouse, keyboard, fields",
+                  "ru": "3. Действия — мышь, клавиатура, поля"},
+    },
+    {
+        "key": "act_ocr",
+        "title": {"en": "4. Actions — OCR, verification, screenshots",
+                  "ru": "4. Действия — OCR, проверки, скриншоты"},
+    },
+    {
+        "key": "act_flow",
+        "title": {"en": "5. Actions — branching and jumps",
+                  "ru": "5. Действия — ветвления и переходы"},
+    },
+    {
+        "key": "act_files",
+        "title": {"en": "6. Actions — files, folders, pauses",
+                  "ru": "6. Действия — файлы, папки, паузы"},
+    },
+    {
+        "key": "templates",
+        "title": {"en": "7. Templates, capture and the regions editor",
+                  "ru": "7. Шаблоны, съёмка и редактор регионов"},
+        "body": {
+            "en": """
+<h3>📷 Capture (Ctrl+Shift+S)</h3>
+<p>Freezes a screenshot of all monitors and lets you drag a rectangle over it. For image
+actions the selection is saved as a PNG in <code>templates\\</code> and its path is
+written into Template/area; for OCR, verification and screenshot actions the selection is
+written as absolute coordinates <code>x,y,w,h</code> instead. Esc cancels.</p>
+
+<h3>✏ Regions — the five markings</h3>
+<ul>
+<li><b>Compare (green)</b> — the part of the PNG that is actually matched. Crop it down to
+the stable, unmistakable piece of UI; everything outside is ignored.</li>
+<li><b>Exclude (red)</b> — areas <i>inside</i> Compare that must be ignored: changing
+numbers, timestamps, progress bars, highlighted rows. Matching switches to a masked
+correlation, so the template survives dynamic content.</li>
+<li><b>Click point</b> — where the click actually lands (the centre by default). Move it
+when you must match a label but click the control next to it.</li>
+<li><b>Input zone (blue)</b> — for <i>Fill input field</i>: the box to click. It overrides
+the click point, so you can match a label and type into the field beside it.</li>
+<li><b>Scroll bar</b> — for <i>Scroll panel</i>: where the wheel notches are delivered. It
+also overrides the click point.</li>
+</ul>
+
+<h3>Where it is stored</h3>
+<p>Next to <code>tpl_123.png</code> lies <code>tpl_123.meta.json</code> with these
+rectangles. Keep the pair together — copying only the PNG loses all the markings and the
+whole image is matched again.</p>
+
+<h3>How matching works</h3>
+<p>The search runs on the virtual desktop (all monitors joined), on both grayscale pixels
+and Canny edges, over 11 scales from ×0.5 to ×2.0, and accepts a match from a correlation
+of <b>0.80</b>. When a step fails, the log prints the best score and the scale where it
+happened — that tells you whether to re-capture the template (≈0.7), to crop Compare
+tighter, or to look for the window at all (≈0.2).</p>
+""",
+            "ru": """
+<h3>📷 Capture (Ctrl+Shift+S)</h3>
+<p>Замораживает снимок всех мониторов и даёт обвести область мышью. Для действий с
+картинками выделение сохраняется как PNG в <code>templates\\</code>, а путь подставляется
+в Template/area; для OCR, проверок и скриншотов вместо пути записываются абсолютные
+координаты <code>x,y,w,h</code>. Esc — отмена.</p>
+
+<h3>✏ Regions — пять разметок</h3>
+<ul>
+<li><b>Compare (зелёный)</b> — та часть PNG, по которой реально идёт сравнение. Обрежьте
+её до неизменного, однозначно узнаваемого фрагмента интерфейса; всё вне этой рамки
+игнорируется.</li>
+<li><b>Exclude (красный)</b> — области <i>внутри</i> Compare, которые надо игнорировать:
+меняющиеся числа, время, прогресс-бары, подсветка строк. Сравнение переключается на
+корреляцию с маской, поэтому шаблон выдерживает динамическое содержимое.</li>
+<li><b>Click point</b> — куда именно придётся клик (по умолчанию центр). Сдвиньте его,
+когда искать нужно подпись, а кликать — по соседнему элементу.</li>
+<li><b>Input zone (синий)</b> — для <i>Fill input field</i>: поле, по которому надо
+кликнуть. Приоритетнее точки клика, поэтому можно искать подпись, а печатать в поле
+рядом.</li>
+<li><b>Scroll bar</b> — для <i>Scroll panel</i>: место, куда отправляются щелчки колеса.
+Тоже приоритетнее точки клика.</li>
+</ul>
+
+<h3>Где это хранится</h3>
+<p>Рядом с <code>tpl_123.png</code> лежит <code>tpl_123.meta.json</code> с этими
+прямоугольниками. Держите пару вместе: если скопировать только PNG, вся разметка
+потеряется и сравниваться будет всё изображение.</p>
+
+<h3>Как работает сравнение</h3>
+<p>Поиск идёт по виртуальному рабочему столу (все мониторы вместе), и по оттенкам серого,
+и по контурам Canny, в 11 масштабах от ×0.5 до ×2.0, а совпадением считается корреляция от
+<b>0.80</b>. Когда шаг падает, в лог пишется лучшее совпадение и масштаб, на котором оно
+получилось — по этому числу понятно, надо ли переснять шаблон (≈0.7), обрезать Compare
+плотнее или искать само окно (≈0.2).</p>
+""",
+        },
+    },
+    {
+        "key": "playlist",
+        "title": {"en": "8. Playlist panel and the jump chain",
+                  "ru": "8. Панель плейлиста и цепочка переходов"},
+        "body": {
+            "en": """
+<p>The right-hand panel chains whole scenario files. <b>➕ Add JSON</b> queues programs,
+<b>➖ Remove</b> and ↑ ↓ edit the queue, <b>▶ Run list</b> runs them top to bottom and
+<b>⏹ Stop list</b> stops after the current step. The dot next to the header blinks green
+while a list is running, turns red when it stopped and grey when idle.</p>
+
+<h3>Two lists, two chips</h3>
+<ul>
+<li><b>▣ My list (n)</b> — the list you built. It is what ▶ Run list runs and the only one
+you can edit, and it is kept even when it was never saved to a file.</li>
+<li><b>↷ Jump chain (k/n)</b> — appears as soon as a <i>Move to another
+playlist/scenario</i> or a branch step hands the run over. It lists every scenario the run
+travels through, in order: <b>▶</b> = running now, <b>✓</b> = already finished. If the
+target was a playlist file, all of its programs show up at once.</li>
+</ul>
+<p>The panel switches to the jump chain by itself on every jump, so you can watch the run
+travel. Click <b>▣ My list</b> to get your own programs back — the run keeps going, and
+auto-switching pauses until the next run starts. The chain is a read-only view; editing
+buttons always work on your own list.</p>
+
+<h3>Playlist files</h3>
+<p><b>💾 Save list…</b> exports the panel as <code>{"playlist": [ …paths… ]}</code>, with
+paths relative to the file when possible, so the folder can be moved as a group.
+<b>📂 Load list…</b> loads such a file back. A saved playlist is exactly what a branch or
+a jump step can point at — that is how one decision node drives an entire playlist.</p>
+
+<h3>Preview switcher</h3>
+<p>Click any program to load its steps into the table on the left (it becomes the file you
+are editing, so 💾 Save writes back to it). The bar above the table shows what is loaded
+and where it sits — <code>📄 name.json — [2/4 in playlist]</code> or
+<code>↷ name.json — [2/3 in jump chain]</code> — and <b>◀ Prev / Next ▶</b> step through
+the whole list one program at a time.</p>
+
+<p>The <b>Playlist log</b> below records the list's own history: which program started,
+where a jump went, what failed to load. It starts collapsed — expand it with ▸ Show.</p>
+""",
+            "ru": """
+<p>Правая панель связывает целые файлы-сценарии. <b>➕ Add JSON</b> добавляет программы в
+очередь, <b>➖ Remove</b> и ↑ ↓ правят очередь, <b>▶ Run list</b> выполняет их сверху
+вниз, <b>⏹ Stop list</b> останавливает после текущего шага. Точка рядом с заголовком
+мигает зелёным во время прогона, краснеет после остановки и серая в покое.</p>
+
+<h3>Два списка, два чипа</h3>
+<ul>
+<li><b>▣ My list (n)</b> — список, который вы собрали сами. Именно его запускает
+▶ Run list, только его можно править, и он сохраняется в памяти, даже если ни разу не был
+записан в файл.</li>
+<li><b>↷ Jump chain (k/n)</b> — появляется, как только шаг <i>Move to another
+playlist/scenario</i> или ветвление передаёт управление дальше. Здесь перечислены все
+сценарии, через которые едет прогон, по порядку: <b>▶</b> — идёт сейчас, <b>✓</b> — уже
+пройдено. Если целью был файл-плейлист, все его программы появятся сразу.</li>
+</ul>
+<p>При каждом переходе панель сама показывает цепочку, чтобы было видно движение прогона.
+Нажмите <b>▣ My list</b>, чтобы вернуть свои программы — прогон при этом продолжается, а
+автопереключение приостановится до следующего запуска. Цепочка доступна только для
+просмотра; кнопки правки всегда работают с вашим списком.</p>
+
+<h3>Файлы плейлистов</h3>
+<p><b>💾 Save list…</b> сохраняет панель как <code>{"playlist": [ …пути… ]}</code>, по
+возможности с относительными путями, чтобы папку можно было переносить целиком.
+<b>📂 Load list…</b> загружает такой файл обратно. Именно на сохранённый плейлист может
+указывать ветвление или шаг перехода — так один узел решения проезжает целый плейлист.</p>
+
+<h3>Переключатель предпросмотра</h3>
+<p>Клик по программе загружает её шаги в таблицу слева (она становится файлом, который вы
+редактируете, поэтому 💾 Save пишет именно в него). Полоса над таблицей показывает, что
+загружено и где это находится — <code>📄 name.json — [2/4 in playlist]</code> или
+<code>↷ name.json — [2/3 in jump chain]</code>, а <b>◀ Prev / Next ▶</b> проходят весь
+список по одной программе.</p>
+
+<p><b>Playlist log</b> внизу ведёт историю списка: какая программа началась, куда ушёл
+переход, что не удалось загрузить. Он свёрнут по умолчанию — раскройте кнопкой
+▸ Show.</p>
+""",
+        },
+    },
+    {
+        "key": "tokens",
+        "title": {"en": "9. Tokens, serial numbers, results",
+                  "ru": "9. Токены, серийные номера, результаты"},
+        "body": {
+            "en": """
+<h3>Tokens</h3>
+<ul>
+<li><code>{serial}</code> — the current serial from the <b>Serial</b> field.</li>
+<li><code>{date}</code> — YYYY-MM-DD, <code>{time}</code> — HHMMSS, <code>{ts}</code> —
+epoch seconds (handy for guaranteed-unique names).</li>
+</ul>
+<p>They are expanded in the Value of Type text, Fill input field, Screenshot and all
+folder actions, and in branch / jump paths.</p>
+
+<h3>How the serial counts</h3>
+<p>Every <i>use</i> of <code>{serial}</code> increments the trailing group of digits while
+keeping the prefix and the width: <code>0001 → 0002</code>, <code>SN0099 → SN0100</code>,
+<code>AB → AB1</code>. Up to 16 characters, letters and digits. When the run ends, the
+Serial field is updated to the next value, so the next run continues the count instead of
+starting over. Two <code>{serial}</code> tokens in one step therefore give two different
+numbers — put the serial in a folder name once and reuse that folder.</p>
+
+<h3>Where files go</h3>
+<ul>
+<li><code>results\\</code> — proofs and reports: <code>PASS_…png</code> /
+<code>FAIL_…png</code> from Verify text and the proof branches, the calibration
+<code>.txt</code> report plus a copied <code>_Pattern.png</code>, and any Screenshot whose
+name has no folder of its own.</li>
+<li><code>templates\\</code> — captured PNG templates with their <code>.meta.json</code>
+sidecars.</li>
+<li>Your own scenario and playlist JSON files live wherever you save them; relative paths
+inside them are resolved from the folder of the file that contains them.</li>
+</ul>
+""",
+            "ru": """
+<h3>Токены</h3>
+<ul>
+<li><code>{serial}</code> — текущий серийник из поля <b>Serial</b>.</li>
+<li><code>{date}</code> — ГГГГ-ММ-ДД, <code>{time}</code> — ЧЧММСС, <code>{ts}</code> —
+секунды эпохи (удобно для гарантированно уникальных имён).</li>
+</ul>
+<p>Подставляются в Value действий «Type text», «Fill input field», «Screenshot» и всех
+действий с папками, а также в пути ветвлений и переходов.</p>
+
+<h3>Как считается серийник</h3>
+<p>Каждое <i>использование</i> <code>{serial}</code> увеличивает хвостовую группу цифр,
+сохраняя префикс и количество разрядов: <code>0001 → 0002</code>,
+<code>SN0099 → SN0100</code>, <code>AB → AB1</code>. До 16 символов, буквы и цифры. По
+окончании прогона поле Serial обновляется на следующее значение, поэтому следующий прогон
+продолжает счёт, а не начинает заново. Два токена <code>{serial}</code> в одном шаге дадут
+два разных номера — вставьте серийник один раз в имя папки и дальше используйте эту
+папку.</p>
+
+<h3>Куда попадают файлы</h3>
+<ul>
+<li><code>results\\</code> — доказательства и отчёты: <code>PASS_…png</code> /
+<code>FAIL_…png</code> от «Verify text» и ветвлений с доказательством, отчёт
+<code>.txt</code> по калибровке вместе со скопированным <code>_Pattern.png</code>, а также
+любой скриншот, в имени которого не указана своя папка.</li>
+<li><code>templates\\</code> — снятые PNG-шаблоны с файлами <code>.meta.json</code>.</li>
+<li>Ваши JSON сценариев и плейлистов лежат там, где вы их сохранили; относительные пути
+внутри них считаются от папки того файла, в котором записаны.</li>
+</ul>
+""",
+        },
+    },
+    {
+        "key": "trouble",
+        "title": {"en": "10. Troubleshooting", "ru": "10. Диагностика проблем"},
+        "body": {
+            "en": """
+<ul>
+<li><b>"Automation libraries not found"</b> — the GUI still opens and you can build
+scenarios, but running needs the packages from <code>requirements.txt</code>.</li>
+<li><b>OCR steps fail with a Tesseract message</b> — install the Tesseract engine and
+either add it to PATH or put it in <code>C:\\Program Files\\Tesseract-OCR\\</code>. Every
+other action keeps working without it.</li>
+<li><b>"not found on screen within N s (best match 0.62 at scale 0.9)"</b> — the template
+was not recognised. A best match around 0.7 means it is nearly right: re-capture it, or
+crop <b>Compare</b> to a smaller stable piece and mark changing parts as <b>Exclude</b>.
+A scale far from 1.0 means the target is drawn at another size (different DPI or
+resolution) — that is supported, but a tighter Compare helps a lot.</li>
+<li><b>OCR reads nonsense</b> — capture a tighter region around just the text; avoid
+scaled or anti-aliased text on a busy background. The region is already upscaled ×2.5 and
+thresholded, so what usually helps is <i>less</i> in the frame.</li>
+<li><b>Clicks land in the wrong place</b> — check the click point in ✏ Regions, and
+re-capture templates after changing display scaling. The app makes itself per-monitor
+DPI-aware at start so screenshots, matching and clicks share one coordinate system.</li>
+<li><b>A run must be aborted right now</b> — slam the mouse pointer into the very top-left
+corner of the screen: pyautogui's failsafe aborts the automation immediately. ⏹ Stop is
+the graceful way.</li>
+<li><b>Find win does nothing</b> — it needs the <code>pygetwindow</code> package; without
+it the log says so and the search stays on the current screen.</li>
+<li><b>"Branch chain too deep (200)"</b> — the scenarios keep jumping into each other. The
+guard stops the run; look at the jump chain in the right panel to see the loop.</li>
+<li><b>"Runner is already active"</b> — a run is still in progress; press ⏹ Stop and wait
+for the log to report the end.</li>
+<li><b>The playlist skipped a program</b> — the Playlist log names the file and the
+reason: missing file, a playlist file used where a scenario was expected, or a corrupted
+JSON (it must be a list of step objects).</li>
+</ul>
+""",
+            "ru": """
+<ul>
+<li><b>«Automation libraries not found»</b> — интерфейс всё равно откроется и сценарии
+собирать можно, но для запуска нужны пакеты из <code>requirements.txt</code>.</li>
+<li><b>OCR-шаги падают с сообщением про Tesseract</b> — установите движок Tesseract и либо
+добавьте его в PATH, либо положите в <code>C:\\Program Files\\Tesseract-OCR\\</code>. Все
+остальные действия работают и без него.</li>
+<li><b>«not found on screen within N s (best match 0.62 at scale 0.9)»</b> — шаблон не
+распознан. Лучшее совпадение около 0.7 означает «почти то же самое»: переснимите шаблон
+или обрежьте <b>Compare</b> до меньшего неизменного фрагмента, а меняющиеся части
+отметьте как <b>Exclude</b>. Масштаб, далёкий от 1.0, говорит, что цель отрисована в
+другом размере (другой DPI или разрешение) — это поддерживается, но плотный Compare
+помогает сильно.</li>
+<li><b>OCR читает ерунду</b> — снимите область теснее, только вокруг текста; избегайте
+масштабированного и сглаженного текста на пёстром фоне. Область и так увеличивается в
+2.5 раза и бинаризуется, поэтому помогает обычно <i>меньше</i> лишнего в кадре.</li>
+<li><b>Клики попадают не туда</b> — проверьте точку клика в ✏ Regions и переснимите
+шаблоны после смены масштаба экрана. Программа при старте делает себя per-monitor
+DPI-aware, чтобы снимок, поиск и клики жили в одной системе координат.</li>
+<li><b>Нужно немедленно прервать прогон</b> — резко уведите указатель мыши в самый левый
+верхний угол экрана: защита pyautogui мгновенно прерывает автоматизацию. Штатный способ —
+⏹ Stop.</li>
+<li><b>Find win ничего не делает</b> — нужен пакет <code>pygetwindow</code>; без него в
+лог пишется предупреждение, а поиск остаётся на текущем экране.</li>
+<li><b>«Branch chain too deep (200)»</b> — сценарии переходят друг в друга по кругу.
+Защита останавливает прогон; посмотрите цепочку переходов в правой панели, чтобы найти
+цикл.</li>
+<li><b>«Runner is already active»</b> — прогон ещё идёт; нажмите ⏹ Stop и дождитесь
+сообщения об окончании в логе.</li>
+<li><b>Плейлист пропустил программу</b> — в Playlist log указан файл и причина: файла нет,
+вместо сценария подставлен плейлист, или JSON повреждён (ожидается список объектов-
+шагов).</li>
+</ul>
+""",
+        },
+    },
+]
+
+HELP_UI_TEXT = {
+    "en": {
+        "window": "Full guide",
+        "heading": "Full guide — every action and feature explained",
+        "search": "Search the guide…",
+        "close": "Close",
+        "empty": "Nothing in the guide matches this search.",
+    },
+    "ru": {
+        "window": "Полное руководство",
+        "heading": "Полное руководство — подробно о каждом действии и возможности",
+        "search": "Поиск по руководству…",
+        "close": "Закрыть",
+        "empty": "По этому запросу в руководстве ничего не найдено.",
+    },
+}
+
+
+def help_topic_html(topic, lang):
+    """HTML раздела: либо готовый текст, либо собранные карточки действий."""
+    body = topic.get("body", {}).get(lang)
+    if body is None:
+        body = help_actions_html(topic["key"], lang)
+    return (
+        f"<h2 style='color:#5c93d6; margin:0 0 6px 0;'>{topic['title'][lang]}</h2>"
+        f"{body}"
+    )
+
+
+def help_topic_plain(topic, lang):
+    """Тот же раздел простым текстом — для поиска по руководству."""
+    text = topic["title"][lang] + " " + help_topic_html(topic, lang)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = (text.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"))
+    return text.lower()
+
+
+class HelpDialog(QDialog):
+    """Полное руководство: разделы слева, текст справа, поиск и выбор языка."""
+
+    def __init__(self, parent=None, lang="en", topic_key=None):
+        super().__init__(parent)
+        self._lang = lang if lang in HELP_LANGS else "en"
+        self._topic_key = topic_key or HELP_TOPICS[0]["key"]
+        scr = QApplication.primaryScreen().availableGeometry()
+        self.resize(min(1080, int(scr.width() * 0.8)), min(760, int(scr.height() * 0.85)))
+
+        root = QVBoxLayout(self)
+
+        head = QHBoxLayout()
+        self.heading = QLabel()
+        self.heading.setStyleSheet("font-weight:bold; color:#cfd6dc;")
+        head.addWidget(self.heading)
+        head.addStretch()
+        self.btn_en = QPushButton("English")
+        self.btn_ru = QPushButton("Русский")
+        for btn in (self.btn_en, self.btn_ru):
+            btn.setCheckable(True)
+            btn.setFixedWidth(110)
+            head.addWidget(btn)
+        root.addLayout(head)
+
+        body = QHBoxLayout()
+        side = QWidget()
+        side.setFixedWidth(300)
+        side_lay = QVBoxLayout(side)
+        side_lay.setContentsMargins(0, 0, 0, 0)
+        self.search = QLineEdit()
+        self.search.setClearButtonEnabled(True)
+        side_lay.addWidget(self.search)
+        self.topic_list = QListWidget()
+        self.topic_list.setWordWrap(True)
+        self.topic_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        side_lay.addWidget(self.topic_list, stretch=1)
+        body.addWidget(side)
+        self.view = QTextEdit()
+        self.view.setReadOnly(True)
+        body.addWidget(self.view, stretch=1)
+        root.addLayout(body, stretch=1)
+
+        foot = QHBoxLayout()
+        foot.addStretch()
+        self.btn_close = QPushButton()
+        self.btn_close.clicked.connect(self.accept)
+        foot.addWidget(self.btn_close)
+        root.addLayout(foot)
+
+        self.btn_en.clicked.connect(lambda: self.set_language("en"))
+        self.btn_ru.clicked.connect(lambda: self.set_language("ru"))
+        self.topic_list.currentItemChanged.connect(self._on_topic_changed)
+        self.search.textChanged.connect(lambda _t: self._reload(keep_topic=True))
+
+        # keep_topic=True — уважаем раздел, с которым диалог открыли (F1 по шагу)
+        self._reload(keep_topic=True)
+
+    # ---------- состояние ----------
+
+    def language(self):
+        return self._lang
+
+    def set_language(self, lang):
+        if lang not in HELP_LANGS or lang == self._lang:
+            self._sync_lang_buttons()
+            return
+        self._lang = lang
+        self._reload(keep_topic=True)
+
+    def select_topic(self, topic_key):
+        self._topic_key = topic_key
+        self._reload(keep_topic=True)
+
+    # ---------- отрисовка ----------
+
+    def _matching_topics(self):
+        query = self.search.text().strip().lower()
+        if not query:
+            return list(HELP_TOPICS)
+        return [t for t in HELP_TOPICS if query in help_topic_plain(t, self._lang)]
+
+    def _reload(self, keep_topic=False):
+        ui = HELP_UI_TEXT[self._lang]
+        self.setWindowTitle(f"{APP_NAME} — {ui['window']}")
+        self.heading.setText(ui["heading"])
+        self.search.setPlaceholderText(ui["search"])
+        self.btn_close.setText(ui["close"])
+        self._sync_lang_buttons()
+
+        topics = self._matching_topics()
+        self.topic_list.blockSignals(True)
+        self.topic_list.clear()
+        for topic in topics:
+            item = QListWidgetItem(topic["title"][self._lang])
+            item.setData(Qt.UserRole, topic["key"])
+            self.topic_list.addItem(item)
+        self.topic_list.blockSignals(False)
+
+        if not topics:
+            self.view.setHtml(f"<p style='color:#cfd6dc;'>{ui['empty']}</p>")
+            return
+        keys = [t["key"] for t in topics]
+        key = self._topic_key if (keep_topic and self._topic_key in keys) else keys[0]
+        self._topic_key = key
+        self.topic_list.setCurrentRow(keys.index(key))   # вызовет _on_topic_changed
+
+    def _sync_lang_buttons(self):
+        for btn, lang in ((self.btn_en, "en"), (self.btn_ru, "ru")):
+            btn.blockSignals(True)
+            btn.setChecked(self._lang == lang)
+            btn.blockSignals(False)
+
+    def _on_topic_changed(self, current, _previous=None):
+        if current is None:
+            return
+        self._topic_key = current.data(Qt.UserRole)
+        topic = next((t for t in HELP_TOPICS if t["key"] == self._topic_key), None)
+        if topic is None:
+            return
+        self.view.setHtml(
+            "<div style='color:#dddddd;'>"
+            f"{help_topic_html(topic, self._lang)}"
+            "</div>"
+        )
+        self.view.verticalScrollBar().setValue(0)
+
+
+# ============================================================================
 # СПРАВКА ПО КОЛОНКАМ ТАБЛИЦЫ
 # ============================================================================
 
@@ -2682,6 +3924,13 @@ class MainWindow(QMainWindow):
         self.btn_col_help.setToolTip("Open a window with full explanation of every column")
         self.btn_col_help.clicked.connect(self._show_all_column_help)
         guide_hdr.addWidget(self.btn_col_help)
+        self.btn_full_help = QPushButton("📖 Full guide (F1)")
+        self.btn_full_help.setToolTip(
+            "Deep explanation of every action and feature — English / Русский.\n"
+            "Opens on the section of the action selected in the table."
+        )
+        self.btn_full_help.clicked.connect(lambda: self.show_help())
+        guide_hdr.addWidget(self.btn_full_help)
         guide_hdr.addStretch()
         table_layout.addLayout(guide_hdr)
 
@@ -2996,7 +4245,7 @@ class MainWindow(QMainWindow):
         for key, name in ACTIONS.items():
             combo.addItem(name, key)
         if data:
-            action_key = data.get("action", "click_image")
+            action_key = migrate_action(data.get("action", "click_image"))
             idx = list(ACTIONS).index(action_key) if action_key in ACTIONS else 0
             combo.setCurrentIndex(idx)
         self.table.setCellWidget(r, COL_ACTION, combo)
@@ -3237,15 +4486,8 @@ class MainWindow(QMainWindow):
 
         action = self.table.cellWidget(row, COL_ACTION).currentData()
         img_field = self.table.cellWidget(row, COL_IMAGE)
-        val_field = self.table.cellWidget(row, COL_VALUE)
 
-        if action in ("click_xy", "double_click_xy"):
-            # центр области в абсолютных экранных координатах (для клика)
-            cx, cy = ax + lw // 2, ay + lh // 2
-            val_field.setText(f"{cx}, {cy}")
-            self._log(f"Captured point ({cx}, {cy}) → step {row + 1}", "ok")
-
-        elif action == "fill_field":
+        if action == "fill_field":
             os.makedirs("templates", exist_ok=True)
             path = os.path.join("templates", f"tpl_{int(time.time())}.png")
             img.crop((lx, ly, lx + lw, ly + lh)).save(path)
@@ -3391,6 +4633,13 @@ class MainWindow(QMainWindow):
         m_view.addAction(self.act_view_playlist_log)
 
         m_help = bar.addMenu("&Help")
+        a_guide = QAction("📖 Full guide — English / Русский", self)
+        a_guide.setShortcut(QKeySequence("F1"))
+        a_guide.setToolTip("Deep explanation of every action and feature, in two languages")
+        a_guide.triggered.connect(lambda: self.show_help())
+        m_help.addAction(a_guide)
+        m_help.addSeparator()
+
         a_readme = QAction("Open README", self)
         a_readme.triggered.connect(self.open_readme)
         m_help.addAction(a_readme)
@@ -3432,6 +4681,28 @@ class MainWindow(QMainWindow):
         self.act_view_playlist_log.blockSignals(True)
         self.act_view_playlist_log.setChecked(visible)
         self.act_view_playlist_log.blockSignals(False)
+
+    def show_help(self, topic_key=None):
+        """Полное руководство (F1). Без темы открываем раздел выбранного действия,
+        а язык берём тот, который читали в прошлый раз."""
+        if topic_key is None:
+            topic_key = self._help_topic_for_selection()
+        lang = self._read_state().get("help_lang", "en")
+        dlg = HelpDialog(self, lang=lang, topic_key=topic_key)
+        dlg.exec()
+        if dlg.language() != lang:
+            state = self._read_state()
+            state["help_lang"] = dlg.language()
+            self._write_state(state)
+
+    def _help_topic_for_selection(self):
+        """Раздел руководства по действию выделенной строки (если она есть)."""
+        row = self.table.currentRow()
+        if row < 0:
+            return None
+        combo = self.table.cellWidget(row, COL_ACTION)
+        action = combo.currentData() if combo else None
+        return help_action_topic_key(action) if action else None
 
     def open_readme(self):
         path = os.path.join(os.path.dirname(__file__), "README.md")
@@ -3904,7 +5175,24 @@ class MainWindow(QMainWindow):
             self._playlist_log(f"Loaded {len(steps)} step(s): {os.path.basename(path)}", "ok")
         else:
             self._log(f"Loaded steps: {len(steps)} from {path}", "ok")
+        self._warn_about_retired_steps(path, steps, for_playlist)
         return True
+
+    def _warn_about_retired_steps(self, path, steps, for_playlist=False):
+        """Сообщаем про шаги с убранными действиями: они переведены на клик по
+        шаблону, и для них нужно снять шаблон (иначе шаг упадёт при прогоне)."""
+        found = {}
+        for number, st in enumerate(steps, 1):
+            action = st.get("action")
+            if action in RETIRED_ACTIONS:
+                found.setdefault(action, []).append(number)
+        for action, numbers in found.items():
+            new_key, old_label = RETIRED_ACTIONS[action]
+            rows = ", ".join(str(n) for n in numbers)
+            msg = (f"'{os.path.basename(path)}': step(s) {rows} used '{old_label}', "
+                   f"which was removed → switched to '{ACTIONS[new_key]}'. "
+                   "Capture a template for them with 📷 Capture.")
+            self._playlist_log(msg, "err") if for_playlist else self._log(msg, "err")
 
     def playlist_run(self):
         if self.runner:

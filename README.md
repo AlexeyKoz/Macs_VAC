@@ -1,6 +1,6 @@
 # MACS Visual Automation
 
-**Version 1.3** · see the [Changelog](#changelog) for what changed. The app also
+**Version 1.5** · see the [Changelog](#changelog) for what changed. The app also
 shows a **"What's new"** popup automatically the first time you launch a new
 version, and you can reopen it any time via **Help → What's new**.
 
@@ -27,7 +27,9 @@ folders that are numbered by an auto-incrementing serial number.
   - **multi-monitor aware** (searches the whole virtual desktop).
 - **Built-in region capture** — press **📷 Capture** (or `Ctrl+Shift+S`) to freeze
   the screen and drag a rectangle. Depending on the step type it saves a PNG
-  template, an OCR region, or a click coordinate.
+  template into `templates\` or an OCR region as `x,y,w,h`.
+- **No raw screen coordinates** — every click is aimed by a picture, never by
+  hand-typed `x,y` numbers, so a moved or resized window doesn't break a scenario.
 - **Template thumbnails** — each step row shows a small preview of its template
   image so you can tell steps apart at a glance; click a thumbnail to view it
   full size.
@@ -71,6 +73,10 @@ folders that are numbered by an auto-incrementing serial number.
 - **Collapsible logs** — the Execution log and Playlist log start minimized to
   keep the interface compact; a **▸ Show / ▾ Hide** button next to each header
   (or **View → Show execution log / Show playlist log**) expands them on demand.
+- **Built-in bilingual guide** — **Help → 📖 Full guide** (**F1**) explains every action
+  and every panel in depth, in **English and Russian**, with a search box and sections for
+  the steps table, the regions editor, the playlist, tokens and troubleshooting. Pressing
+  F1 with a step selected opens the guide right at that action.
 - **Version tracking** — the title bar shows the version, a **What's new** popup
   appears once per new version, and **Help → About / What's new** shows the full
   change history.
@@ -391,8 +397,8 @@ venv\Scripts\python.exe MACS_Visual_Automation.py
    - **Timeout** — seconds to keep searching before failing.
    - **Find win** — cycle windows to locate a hidden target.
    - **Stop** — stop the whole scenario if this step errors (on by default).
-3. Use **📷 Capture** (`Ctrl+Shift+S`) with a row selected to grab a template,
-   an OCR region, or a click point straight from the screen. The **Preview**
+3. Use **📷 Capture** (`Ctrl+Shift+S`) with a row selected to grab a template or
+   an OCR region straight from the screen. The **Preview**
    column then shows a thumbnail of the template — click it to view full size.
    Use **✏ Regions** to edit compare/exclude/click zones for template-based steps.
    For **branch** steps, use **↷ Branch setup** to pick Way A / Way B JSON files.
@@ -418,7 +424,8 @@ venv\Scripts\python.exe MACS_Visual_Automation.py
 9. Use the top menu for quick navigation:
    - **File** → Open/Save scenario, Add JSON to playlist, Run playlist, Exit
    - **View** → Show/Hide playlist panel, Show execution log, Show playlist log
-   - **Help** → Open `README.md`, **What's new**, **About** (shows version)
+   - **Help** → **📖 Full guide** (**F1**, English/Russian), Open `README.md`,
+     **What's new**, **About** (shows version)
 
 > Safety: `pyautogui`'s fail-safe is **on** — slamming the mouse into a screen
 > corner aborts the run.
@@ -572,12 +579,15 @@ possible, so you can move `scenarios\` as a group.
 
 ## Actions reference
 
+> Inside the app, **Help → 📖 Full guide** (or **F1**) opens the same reference in far more
+> depth — in **English and Russian** — including what each action does internally, when
+> `Timeout` actually retries, and what every proof file contains. F1 opens straight at the
+> section of the action selected in the table, and the guide has its own search box.
+
 | Action | What it does | Value field |
 | --- | --- | --- |
 | **Click on template** | Find the template image on screen and click its center | *(not needed)* |
 | **Double-click on template** | Same, double-click | *(not needed)* |
-| **Click on coordinates (x,y)** | Click absolute screen coordinates | `450, 300` |
-| **Double-click on coordinates (x,y)** | Double-click absolute coordinates | `450, 300` |
 | **Wait for template to appear** | Wait until the template shows up (no click) | *(not needed)* |
 | **Scroll panel (mouse wheel)** | Find a scroll panel and send wheel events at its scrollbar zone | `down, 5` / `up, 3` |
 | **Press key / shortcut** | Press one key or a hotkey combination | `enter`, `backspace`, `ctrl+a`, `ctrl+shift+s` |
@@ -598,6 +608,16 @@ possible, so you can move `scenarios\` as a group.
 | **Rename folder** | Rename the selected folder/file | new name/path |
 | **Delete folder on disk (by path)** | Delete a folder **on disk** by path (or the selected one). *Not* related to on-screen clicks | path, or empty = selected |
 | **Pause (seconds)** | Wait a fixed time | seconds, e.g. `3` |
+
+### Removed actions (and what happens to old scenarios)
+
+*Click on coordinates (x,y)* and *Double-click on coordinates (x,y)* were dropped in
+**1.5**: there was no practical way to find those numbers, and such a step stopped
+working the moment the window moved. Scenarios that still contain them load fine —
+the step becomes **Click on template** / **Double-click on template** and the
+execution log lists the step numbers that now need a template captured with
+**📷 Capture**. Saving the scenario again writes the new action, so each file only
+needs fixing once.
 
 ### Tokens (expanded in paths / typed text)
 
@@ -782,6 +802,10 @@ Captured templates are stored under `templates\`, and proof/screenshots under
   **Find win** if the target window may be hidden.
 - **"Find window" does nothing** — it needs `PyGetWindow` (installed via
   requirements) and is intended for Windows.
+- **An old scenario logs "…was removed → switched to Click on template"** — that
+  step used one of the deleted `x,y` click actions. Select the step numbers the log
+  names, capture a template for each with **📷 Capture**, and save the scenario; the
+  warning won't come back.
 
 ---
 
@@ -795,6 +819,31 @@ popup once whenever `APP_VERSION` changes (it remembers the last-seen version in
 > **Maintaining versions:** when you add a feature, bump `APP_VERSION` and add a
 > new entry at the **top** of `CHANGELOG` (`(version, date, [changes])`) — the
 > popup, the **Help → What's new** dialog, and this file should stay in sync.
+
+### Version 1.5 — 2026-08-07
+
+- **Removed the two raw-coordinate actions** — *Click on coordinates (x,y)* and
+  *Double-click on coordinates (x,y)*. Old scenarios keep working: those steps
+  load as **Click on template** / **Double-click on template**, and the log names
+  the step numbers that need a **📷 Capture** (see
+  [Removed actions](#removed-actions-and-what-happens-to-old-scenarios)).
+- **New Help → 📖 Full guide (F1)** — a searchable manual in **English and
+  Russian** covering every action in depth (search scales and match threshold,
+  when `Timeout` retries and when it doesn't, what each proof file contains),
+  plus the steps table, capture and the regions editor, the playlist and jump
+  chain, tokens and troubleshooting. **F1** opens straight at the section of the
+  action selected in the table, and the chosen language is remembered.
+- **The playlist panel follows the run** — a *Move to another playlist/scenario*
+  (or branch) step switches the right panel to a **↷ Jump chain** view listing
+  every scenario the run moves through (**▶** running, **✓** done), while your
+  own list — saved or not — stays behind the **▣ My list** chip and remains what
+  **▶ Run list** and all editing apply to (see the *Two lists in one panel*
+  section under [Playlist mode](#playlist-mode-multi-json-queue)).
+- **Progress markers in the list** — a running playlist marks programs with
+  **▶** / **✓**, and the bar above the steps table says whether you are looking
+  at a playlist position or a jump-chain position.
+- **Fixed:** after a single **▶ Run** the engine was never released, so
+  **▶ Run list** kept answering *"Runner is already active"* until restart.
 
 ### Version 1.3 — 2026-08-07
 
@@ -856,9 +905,14 @@ First versioned release — the baseline for change tracking.
 ## Project files
 
 - `MACS_Visual_Automation.py` — the application (GUI + automation engine).
-- `app_state.json` — remembers the last-seen version for the What's new popup
-  (created on first run; safe to delete — it just re-shows the popup once).
+- `app_state.json` — remembers the last-seen version for the What's new popup and
+  the language chosen in the full guide (created on first run; safe to delete — it
+  just re-shows the popup once).
 - `test_match.py` — standalone template-matching diagnostic tool.
+- `test_help_guide.py`, `test_playlist_jump_panel.py`, `test_playlist_preview.py`,
+  `test_retired_actions.py` — self-checking regression scripts (run them with
+  `venv\Scripts\python.exe <file>`; they render the UI offscreen, so no window
+  appears and the mouse is never touched).
 - `requirements.txt` — Python dependencies.
 - `download_packages.bat` — download Python, Tesseract, and pip wheels (online PC).
 - `install_offline.bat` — idempotently install everything from local folders
