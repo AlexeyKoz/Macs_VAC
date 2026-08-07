@@ -4,6 +4,9 @@
 # NOTE: OCR steps ("OCR check" / "Verify text") additionally require the
 # Tesseract OCR *engine* installed on the system (not a pip package).
 # See the README for install instructions.
+#
+# NOTE: the "IF gimbal calib CSV OK (Az/El)" branch (branch_calib) reads CSV
+# files with Python's built-in `csv` module — no extra package needed.
 
 # --- GUI framework ---
 PySide6>=6.6.0            # Qt 6 bindings (main window, table, overlay)

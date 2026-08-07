@@ -21,6 +21,7 @@ AutoBuilder — визуальный конструктор автоматиза
 import sys
 import os
 import re
+import csv
 import json
 import time
 import shutil
@@ -53,10 +54,98 @@ from PySide6.QtWidgets import (
     QLineEdit, QLabel, QTextEdit, QFileDialog, QSpinBox, QHeaderView,
     QDoubleSpinBox, QSplitter, QDialog, QScrollArea, QAbstractItemView,
     QListWidget, QListWidgetItem, QFrame,
-    QStyle, QStyleOptionButton, QStyleOptionHeader, QToolTip,
+    QStyle, QStyleOptionButton, QStyleOptionHeader, QToolTip, QMessageBox,
 )
 from PySide6.QtCore import Qt, QThread, Signal, QRect, QPoint, QTimer
 from PySide6.QtGui import QColor, QImage, QPixmap, QPainter, QPen, QShortcut, QKeySequence, QAction
+
+
+# ============================================================================
+# ВЕРСИЯ ПРИЛОЖЕНИЯ + ИСТОРИЯ ИЗМЕНЕНИЙ
+# ----------------------------------------------------------------------------
+# При добавлении новых возможностей: подними APP_VERSION и добавь запись в
+# CHANGELOG (сверху — самая новая версия). Приложение покажет «What's new»
+# один раз, когда версия сменится (запоминается в app_state.json рядом с .py).
+# ============================================================================
+
+APP_NAME = "MACS Visual Automation"
+APP_VERSION = "1.3"
+
+CHANGELOG = [
+    (
+        "1.3",
+        "2026-08-07",
+        [
+            "Collapsible logs to free up space: the Execution log (left) and Playlist "
+            "log (right) now start minimized, each with a small ▸ Show / ▾ Hide button "
+            "next to its header — expand only when you need to look at it.",
+            "New View menu items 'Show execution log' and 'Show playlist log' let you "
+            "toggle both logs from the top menu too, alongside the existing 'Show "
+            "playlist panel' option.",
+        ],
+    ),
+    (
+        "1.2",
+        "2026-08-07",
+        [
+            "New action: 'Move to another playlist/scenario' (goto_playlist) — an "
+            "unconditional jump (no A/B, no condition): put a playlist or scenario JSON "
+            "path in Template/area and the run switches to it as soon as the step "
+            "executes. Great for handing off to another playlist once you've reached a "
+            "result, without needing a branch condition.",
+            "Playlist preview switcher: click any program in the right-hand playlist "
+            "panel to load its steps into the left-hand table for viewing/editing. A "
+            "new bar above the table shows the current file and its position in the "
+            "playlist, with ◀ Prev / Next ▶ buttons to step through every program one "
+            "by one. The bar also tracks progress automatically while a playlist runs.",
+        ],
+    ),
+    (
+        "1.1",
+        "2026-08-06",
+        [
+            "New action: 'IF gimbal calib CSV OK (Az/El) → A else B (+ proof)' (branch_calib) — "
+            "reads a gimbal calibration CSV (Azimuth, Elevation, Gain/Power columns), finds the "
+            "Az/El boresight offsets from the peak-gain point on each raw cut, and checks a "
+            "tolerance condition like 'abs(Az)<=0.3 AND abs(El)<=0.3'.",
+            "Way A = calibration OK, Way B = out of tolerance — point Way B at a recalibration "
+            "scenario (adjust the gimbal tolerance, calibrate again) to build a retry loop.",
+            "Saves a PASS/FAIL .txt report to results\\ with the computed offsets; if a "
+            "'<csv name>_Pattern.png' sits next to the CSV, it's copied there too as proof.",
+        ],
+    ),
+    (
+        "1.0",
+        "2026-08-06",
+        [
+            "First versioned release — baseline for change tracking.",
+            "New action: 'IF value condition met → A else B (+ proof)' (branch_value) — "
+            "reads numbers via OCR and checks conditions like 'Az ML<=0.1 AND El ML<=0.1' "
+            "(supports <= >= < > == !=, AND/OR, and abs()/|...| for tolerance). Saves a "
+            "PASS/FAIL proof screenshot automatically.",
+            "Branch targets (Way A / Way B) can now point to a PLAYLIST file — the whole "
+            "playlist is driven through in order instead of loading a single scenario.",
+            "Playlist panel: new '💾 Save list…' / '📂 Load list…' buttons to export/import "
+            "the playlist as a reusable file (perfect as a branch target).",
+            "Anti-loop branch-depth guard raised to 200 to support recalibration loops.",
+            "About / What's new dialog added under the Help menu, with version tracking.",
+        ],
+    ),
+]
+
+
+def changelog_html(entries=None):
+    """HTML-текст истории изменений для окна «What's new / About»."""
+    entries = entries if entries is not None else CHANGELOG
+    parts = []
+    for ver, date, items in entries:
+        parts.append(f"<h3 style='margin:8px 0 2px'>Version {ver} "
+                     f"<span style='color:#888;font-weight:normal'>({date})</span></h3>")
+        parts.append("<ul style='margin:0 0 8px 0'>")
+        for it in items:
+            parts.append(f"<li style='margin-bottom:4px'>{it}</li>")
+        parts.append("</ul>")
+    return "".join(parts)
 
 # --- Автоматизация (импортим мягко, чтобы GUI открылся даже без библиотек) ---
 try:
@@ -367,6 +456,8 @@ ACTIONS = {
     "branch_text":         "IF word found (OCR) → JSON A else JSON B",
     "branch_verify":       "IF word found → JSON A else JSON B (+ proof screenshot)",
     "branch_value":        "IF value condition met → A else B (+ proof, A/B may be playlist)",
+    "branch_calib":        "IF gimbal calib CSV OK (Az/El) → A else B (+ proof)",
+    "goto_playlist":       "Move to another playlist/scenario",
     "screenshot":          "Screenshot of area",
     "select_target":       "Select folder/file (for next step)",
     "create_folder":       "Create folder",
@@ -393,6 +484,8 @@ VALUE_HINT = {
     "branch_text":         "word | wayA.json | wayB.json",
     "branch_verify":       "word | wayA.json | wayB.json  (+ saves PASS/FAIL proof)",
     "branch_value":        "Az ML<=0.1 AND El ML<=0.1 | wayA | wayB  (use ↷ Branch setup)",
+    "branch_calib":        "abs(Az)<=0.3 AND abs(El)<=0.3 | wayA | wayB  (use ↷ Branch setup)",
+    "goto_playlist":       "(not needed — put the path in Template/area)",
     "screenshot":          "name, e.g. unit_{serial}\\log.png",
     "select_target":       "path to select, e.g. results\\unit_{serial}",
     "create_folder":       "path, e.g. results\\unit_{serial}",
@@ -404,7 +497,9 @@ VALUE_HINT = {
 # Колонки таблицы
 COL_ON, COL_ACTION, COL_IMAGE, COL_BROWSE, COL_PREVIEW, COL_VALUE, COL_TIMEOUT, COL_FIND, COL_STOP = range(9)
 
-BRANCH_ACTIONS = frozenset({"branch_image", "branch_text", "branch_verify", "branch_value"})
+BRANCH_ACTIONS = frozenset(
+    {"branch_image", "branch_text", "branch_verify", "branch_value", "branch_calib"}
+)
 MAX_BRANCH_DEPTH = 200
 
 # Подсказки к колонкам таблицы шагов (видны в панели над таблицей + при наведении на заголовок)
@@ -420,7 +515,11 @@ COLUMN_HELP = {
         "• IF template found — branch on image on screen.\n"
         "• IF word found (OCR) — branch on text in a region.\n"
         "• IF word found (+ proof) — branch + PASS/FAIL screenshot.\n"
-        "Use ↷ Branch setup to pick Way A / Way B JSON files."
+        "• IF value condition met — branch on OCR-read numbers (+ proof).\n"
+        "• IF gimbal calib CSV OK — branch on Az/El offsets from a calibration CSV.\n"
+        "Use ↷ Branch setup to pick Way A / Way B JSON files.\n"
+        "• Move to another playlist/scenario — unconditional jump (no A/B, no "
+        "condition): put the target JSON path in Template/area."
     ),
     COL_IMAGE: (
         "TEMPLATE / AREA — the target for this step.\n"
@@ -613,6 +712,75 @@ def evaluate_value_condition(expr, text):
             group_results.append(all(clause_results))
     result = any(group_results) if group_results else False
     return result, "; ".join(details)
+
+
+# ---------------------------------------------------------------------------
+# Проверка калибровки гимбала по CSV (branch_calib)
+# CSV — результат сканирования гимбала: колонки Azimuth/Elevation/Gain(или Power).
+# Az-сечение = строки с El, ближайшим к 0 (ищем Az пика усиления в них).
+# El-сечение = строки с Az, ближайшим к 0 (ищем El пика усиления в них).
+# ---------------------------------------------------------------------------
+
+def read_calib_csv(path):
+    """Читает CSV калибровки гимбала → список {"az":, "el":, "gain":}.
+
+    Колонки ищутся по имени (без учёта регистра/лишних слов): Azimuth, Elevation,
+    Antenna Gain (или, если её нет, Power Received).
+    """
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError(f"calibration CSV not found: {path}")
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+
+        def find_col(*keys):
+            for name in fieldnames:
+                low = name.strip().lower()
+                if any(k in low for k in keys):
+                    return name
+            return None
+
+        az_col = find_col("azimuth", "az")
+        el_col = find_col("elevation", "el")
+        gain_col = find_col("antenna gain", "gain") or find_col("power received", "power", "dbm")
+        if not az_col or not el_col or not gain_col:
+            raise ValueError(
+                "calibration CSV must have Azimuth, Elevation and Gain/Power columns "
+                f"(found columns: {fieldnames})"
+            )
+        rows = []
+        for row in reader:
+            az = _num(row.get(az_col))
+            el = _num(row.get(el_col))
+            gain = _num(row.get(gain_col))
+            if az is None or el is None or gain is None:
+                continue
+            rows.append({"az": az, "el": el, "gain": gain})
+    if not rows:
+        raise ValueError(f"calibration CSV has no valid data rows: {path}")
+    return rows
+
+
+def compute_calib_offsets(path):
+    """Вычисляет боресайт-ошибки Az/El (метод пика усиления по raw-сечениям).
+
+    Возвращает (az_offset, el_offset, info); info — для отчёта/лога.
+    """
+    rows = read_calib_csv(path)
+    el0 = min(abs(r["el"]) for r in rows)
+    az_cut = [r for r in rows if abs(r["el"]) <= el0 + 1e-9]
+    az0 = min(abs(r["az"]) for r in rows)
+    el_cut = [r for r in rows if abs(r["az"]) <= az0 + 1e-9]
+    if not az_cut or not el_cut:
+        raise ValueError("could not isolate Az/El cuts in calibration CSV")
+    az_peak = max(az_cut, key=lambda r: r["gain"])
+    el_peak = max(el_cut, key=lambda r: r["gain"])
+    info = {
+        "az_offset": az_peak["az"], "az_gain": az_peak["gain"], "az_points": len(az_cut),
+        "el_offset": el_peak["el"], "el_gain": el_peak["gain"], "el_points": len(el_cut),
+        "points": len(rows),
+    }
+    return az_peak["az"], el_peak["el"], info
 
 
 # ---------------------------------------------------------------------------
@@ -956,7 +1124,7 @@ class Runner(QThread):
                 waited += 0.2
             self.log.emit(f"[{i}] ✓ {label} finished", "ok")
 
-        elif a in ("branch_image", "branch_text", "branch_verify", "branch_value"):
+        elif a in ("branch_image", "branch_text", "branch_verify", "branch_value", "branch_calib"):
             # Условный переход («узел»): проверяем условие и выбираем JSON-сценарий.
             # Пустой путь на выбранной стороне = продолжаем текущий сценарий.
             # Выбранная ветка может указывать на плейлист-файл (список сценариев).
@@ -996,6 +1164,52 @@ class Runner(QThread):
                 proof = os.path.join("results", f"{status}_{safe}_{int(time.time())}.png")
                 img.save(proof)
                 self.log.emit(f"[{i}]   proof screenshot → {proof}", "info")
+            elif a == "branch_calib":
+                # keyword хранит условие, напр. "abs(Az)<=0.3 AND abs(El)<=0.3"
+                if not keyword:
+                    raise RuntimeError(
+                        "branch condition is empty — e.g. 'abs(Az)<=0.3 AND abs(El)<=0.3' "
+                        "(use ↷ Branch setup button)")
+                if not path_a and not path_b:
+                    raise RuntimeError(
+                        "Configure branch paths: condition | Way A | Way B "
+                        "(use ↷ Branch setup button)")
+                csv_path = self._expand(st["image"].strip())
+                if not csv_path:
+                    raise RuntimeError(
+                        "no calibration CSV given — put its path in Template/area "
+                        "(e.g. calib.csv)")
+                az_offset, el_offset, cinfo = compute_calib_offsets(csv_path)
+                text = f"Az: {az_offset:.3f}  El: {el_offset:.3f}"
+                found, detail = evaluate_value_condition(keyword, text)
+                cond = f"Az={az_offset:.2f} El={el_offset:.2f} → condition {'TRUE' if found else 'FALSE'} [{detail}]"
+                # отчёт (PASS/FAIL) + копия картинки паттерна, если она лежит рядом с CSV
+                os.makedirs("results", exist_ok=True)
+                status = "PASS" if found else "FAIL"
+                safe = "".join(c if c.isalnum() else "_" for c in (keyword[:40] or "calib"))
+                stamp = int(time.time())
+                report = os.path.join("results", f"{status}_{safe}_{stamp}.txt")
+                with open(report, "w", encoding="utf-8") as f:
+                    f.write(
+                        "Gimbal calibration check\n"
+                        f"csv: {os.path.abspath(csv_path)}\n"
+                        f"Az offset: {az_offset:.3f} deg "
+                        f"(peak gain {cinfo['az_gain']:.3f} over {cinfo['az_points']} pts)\n"
+                        f"El offset: {el_offset:.3f} deg "
+                        f"(peak gain {cinfo['el_gain']:.3f} over {cinfo['el_points']} pts)\n"
+                        f"condition: {keyword}\n"
+                        f"result: {status}\n"
+                        f"detail: {detail}\n"
+                    )
+                self.log.emit(f"[{i}]   report → {report}", "info")
+                base, _ext = os.path.splitext(csv_path)
+                for suffix in ("_Pattern.png", "_pattern.png", "_Pattern.PNG"):
+                    pattern_png = base + suffix
+                    if os.path.isfile(pattern_png):
+                        proof_png = os.path.join("results", f"{status}_{safe}_{stamp}.png")
+                        shutil.copy(pattern_png, proof_png)
+                        self.log.emit(f"[{i}]   pattern proof → {proof_png}", "info")
+                        break
             else:
                 if not keyword:
                     raise RuntimeError("branch keyword is empty")
@@ -1032,6 +1246,19 @@ class Runner(QThread):
                 self.log.emit(
                     f"[{i}] ✓ {label}: {cond} → way {side}: "
                     f"{os.path.basename(target)}", "ok")
+
+        elif a == "goto_playlist":
+            # Безусловный переход (без ветвления): всегда грузим указанный
+            # сценарий или плейлист-файл, как только этот шаг выполнится.
+            target_raw = st["image"].strip()
+            if not target_raw:
+                raise RuntimeError(
+                    "no playlist/scenario path given — put it in Template/area")
+            target = self._resolve_branch_path(target_raw)
+            if not target or not os.path.isfile(target):
+                raise FileNotFoundError(f"playlist/scenario not found: {target}")
+            self._branch_target = target
+            self.log.emit(f"[{i}] ✓ {label} → {os.path.basename(target)}", "ok")
 
     # масштабы для мультимасштабного поиска (DPI/разное разрешение экрана)
     _SCALES = (1.0, 0.9, 1.1, 0.8, 1.25, 0.75, 0.67, 1.5, 0.6, 0.5, 2.0)
@@ -2040,6 +2267,7 @@ class BranchConfigDialog(QDialog):
             "branch_text": "Branch on OCR text (word found?)",
             "branch_verify": "Branch on verify result (word found? + proof)",
             "branch_value": "Branch on measured value (numeric condition + proof)",
+            "branch_calib": "Branch on gimbal calibration CSV (Az/El tolerance + proof)",
         }
         self.setWindowTitle(titles.get(action, "Configure branch"))
         self.setMinimumWidth(520)
@@ -2072,6 +2300,21 @@ class BranchConfigDialog(QDialog):
                 "• Way A — runs if the condition is TRUE (PASS).  • Way B — if FALSE (FAIL).\n"
                 "A PASS/FAIL proof screenshot is always saved to results\\."
             ),
+            "branch_calib": (
+                "Reads the gimbal calibration CSV in Template/area (e.g. calib.csv, produced "
+                "after a calibration run) and finds the boresight offsets:\n"
+                "  Az offset = azimuth of peak gain along the El≈0 cut\n"
+                "  El offset = elevation of peak gain along the Az≈0 cut\n"
+                "Condition = one or more 'Label OP Value' clauses joined by AND / OR, using "
+                "labels Az / El, e.g.:\n"
+                "    abs(Az)<=0.3 AND abs(El)<=0.3   (calibration within ±0.3°)\n"
+                "OPs: <=  >=  <  >  ==  !=   |   wrap a label in abs(...) or |...| for |value|.\n"
+                "• Way A — runs if the condition is TRUE (calibration OK).\n"
+                "• Way B — runs if FALSE (out of tolerance) — point it at your recalibration "
+                "scenario so the gimbal calibrates again with the new tolerance.\n"
+                "A PASS/FAIL report (.txt) is saved to results\\; if a '<csv name>_Pattern.png' "
+                "file sits next to the CSV, it's copied there too as visual proof."
+            ),
         }
         hint = QLabel(help_text.get(action, ""))
         hint.setWordWrap(True)
@@ -2084,6 +2327,10 @@ class BranchConfigDialog(QDialog):
         if action == "branch_value":
             lay.addWidget(QLabel("Value condition (e.g. Az ML<=0.1 AND El ML<=0.1):"))
             self._keyword.setPlaceholderText("Az ML<=0.1 AND El ML<=0.1")
+            lay.addWidget(self._keyword)
+        elif action == "branch_calib":
+            lay.addWidget(QLabel("Value condition (e.g. abs(Az)<=0.3 AND abs(El)<=0.3):"))
+            self._keyword.setPlaceholderText("abs(Az)<=0.3 AND abs(El)<=0.3")
             lay.addWidget(self._keyword)
         elif action != "branch_image":
             lay.addWidget(QLabel("Keyword to search for:"))
@@ -2241,7 +2488,7 @@ class MasterCheckboxHeader(QHeaderView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("AutoBuilder — automation builder")
+        self.setWindowTitle(f"{APP_NAME} — v{APP_VERSION}")
         self.setMinimumSize(900, 560)
         # просторный старт (~три четверти экрана) — элементы читаемы даже не в фуллскрине
         scr = QApplication.primaryScreen().availableGeometry()
@@ -2257,6 +2504,7 @@ class MainWindow(QMainWindow):
         self._pending_branch = None    # JSON, на который перейти после текущего прогона
         self._branch_queue = []        # очередь сценариев из ветки-плейлиста (по порядку)
         self._branch_depth = 0         # защита от бесконечных циклов ветвления
+        self._preview_index = -1       # индекс в playlist_list, чьи шаги сейчас показаны слева
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -2335,7 +2583,7 @@ class MainWindow(QMainWindow):
         root.addLayout(tools)
 
         # --- Левая часть: таблица сверху, лог снизу ---
-        left_splitter = QSplitter(Qt.Vertical)
+        self.left_splitter = left_splitter = QSplitter(Qt.Vertical)
         left_splitter.setHandleWidth(7)
         left_splitter.setChildrenCollapsible(False)
 
@@ -2344,6 +2592,29 @@ class MainWindow(QMainWindow):
         table_layout = QVBoxLayout(table_box)
         table_layout.setContentsMargins(0, 0, 0, 0)
         table_layout.setSpacing(4)
+
+        # Переключатель предпросмотра: какой файл сейчас показан слева, и
+        # позиция в плейлисте (если это один из его пунктов) с Prev/Next.
+        preview_bar = QHBoxLayout()
+        self.preview_label = QLabel("📄 (unsaved scenario)")
+        self.preview_label.setStyleSheet("color:#cfd6dc; font-weight:bold;")
+        preview_bar.addWidget(self.preview_label)
+        preview_bar.addStretch()
+        self.btn_preview_prev = QPushButton("◀ Prev")
+        self.btn_preview_next = QPushButton("Next ▶")
+        self.btn_preview_prev.setToolTip(
+            "Show the previous program in the playlist (right panel) here, "
+            "so you can step through them one by one."
+        )
+        self.btn_preview_next.setToolTip(
+            "Show the next program in the playlist (right panel) here, "
+            "so you can step through them one by one."
+        )
+        self.btn_preview_prev.setEnabled(False)
+        self.btn_preview_next.setEnabled(False)
+        preview_bar.addWidget(self.btn_preview_prev)
+        preview_bar.addWidget(self.btn_preview_next)
+        table_layout.addLayout(preview_bar)
 
         guide_hdr = QHBoxLayout()
         guide_hdr.addWidget(QLabel("Column guide:"))
@@ -2398,11 +2669,18 @@ class MainWindow(QMainWindow):
         table_layout.addWidget(self.table)
         left_splitter.addWidget(table_box)
 
-        # Лог
+        # Лог (сворачиваемый — кнопка рядом с заголовком, чтобы освободить место)
         log_box = QWidget()
         log_layout = QVBoxLayout(log_box)
         log_layout.setContentsMargins(0, 4, 0, 0)
-        log_layout.addWidget(QLabel("Execution log:"))
+        log_hdr = QHBoxLayout()
+        log_hdr.addWidget(QLabel("Execution log:"))
+        log_hdr.addStretch()
+        self.btn_log_toggle = QPushButton("▸ Show")
+        self.btn_log_toggle.setFixedWidth(90)
+        self.btn_log_toggle.setToolTip("Collapse/expand the execution log to save space")
+        log_hdr.addWidget(self.btn_log_toggle)
+        log_layout.addLayout(log_hdr)
         self.log_view = QTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setStyleSheet("font-family: Consolas, monospace; font-size: 13px;")
@@ -2430,7 +2708,11 @@ class MainWindow(QMainWindow):
 
         self.playlist_list = QListWidget()
         self.playlist_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.playlist_list.setToolTip("Order matters: programs run top → bottom")
+        self.playlist_list.setToolTip(
+            "Order matters: programs run top → bottom.\n"
+            "Click a program to preview its steps on the left "
+            "(◀ Prev / Next ▶ there step through the whole list)."
+        )
         playlist_layout.addWidget(self.playlist_list, stretch=1)
 
         row1 = QHBoxLayout()
@@ -2464,7 +2746,14 @@ class MainWindow(QMainWindow):
         row2.addWidget(self.btn_pl_stop)
         playlist_layout.addLayout(row2)
 
-        playlist_layout.addWidget(QLabel("Playlist log:"))
+        pl_log_hdr = QHBoxLayout()
+        pl_log_hdr.addWidget(QLabel("Playlist log:"))
+        pl_log_hdr.addStretch()
+        self.btn_pl_log_toggle = QPushButton("▸ Show")
+        self.btn_pl_log_toggle.setFixedWidth(90)
+        self.btn_pl_log_toggle.setToolTip("Collapse/expand the playlist log to save space")
+        pl_log_hdr.addWidget(self.btn_pl_log_toggle)
+        playlist_layout.addLayout(pl_log_hdr)
         self.playlist_log_view = QTextEdit()
         self.playlist_log_view.setReadOnly(True)
         self.playlist_log_view.setStyleSheet("font-family: Consolas, monospace; font-size: 13px;")
@@ -2506,6 +2795,15 @@ class MainWindow(QMainWindow):
         self.btn_pl_stop.clicked.connect(self.playlist_stop)
         self.btn_pl_export.clicked.connect(self.playlist_export)
         self.btn_pl_import.clicked.connect(self.playlist_import)
+        self.playlist_list.itemClicked.connect(self._on_playlist_item_clicked)
+        self.btn_preview_prev.clicked.connect(lambda: self._preview_step(-1))
+        self.btn_preview_next.clicked.connect(lambda: self._preview_step(1))
+        self.btn_log_toggle.clicked.connect(
+            lambda: self.set_execution_log_visible(not self.log_view.isVisible())
+        )
+        self.btn_pl_log_toggle.clicked.connect(
+            lambda: self.set_playlist_log_visible(not self.playlist_log_view.isVisible())
+        )
 
         # горячая клавиша для захвата области
         QShortcut(QKeySequence("Ctrl+Shift+S"), self, activated=self.capture_region)
@@ -2518,6 +2816,10 @@ class MainWindow(QMainWindow):
         self._blink_timer.timeout.connect(self._blink_status)
         self._set_play_state("idle")
         self._build_menu()
+        # Логи стартуют свёрнутыми, чтобы не «сжимать» остальной интерфейс —
+        # разворачиваются кнопкой ▸ Show рядом с заголовком или через View-меню.
+        self.set_execution_log_visible(False)
+        self.set_playlist_log_visible(False)
 
         if not AUTOMATION_OK:
             self._log(f"⚠ Automation libraries not found: {_IMPORT_ERR}", "err")
@@ -2667,6 +2969,10 @@ class MainWindow(QMainWindow):
                 img.setPlaceholderText("template png — capture large area, then mark scroll bar")
             elif action == "fill_field":
                 img.setPlaceholderText("capture label+field — then set compare / input zone")
+            elif action == "branch_calib":
+                img.setPlaceholderText("path to calibration CSV (Azimuth,Elevation,Gain columns)")
+            elif action == "goto_playlist":
+                img.setPlaceholderText("path to a playlist or scenario JSON to jump to")
             elif action in BRANCH_ACTIONS:
                 img.setPlaceholderText(
                     "template png (image branch) or x,y,w,h OCR region (text branch)"
@@ -2676,8 +2982,8 @@ class MainWindow(QMainWindow):
 
     def _browse(self, edit):
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select template", "",
-            "Images (*.png *.jpg *.jpeg *.bmp);;All (*)"
+            self, "Select template / file", "",
+            "Images (*.png *.jpg *.jpeg *.bmp);;CSV (*.csv);;JSON (*.json);;All (*)"
         )
         if path:
             edit.setText(path)
@@ -2716,7 +3022,9 @@ class MainWindow(QMainWindow):
                 "Change Action to a branch type first:\n"
                 "  • IF template found → JSON A else JSON B\n"
                 "  • IF word found (OCR) → JSON A else JSON B\n"
-                "  • IF word found (+ proof) → JSON A else JSON B",
+                "  • IF word found (+ proof) → JSON A else JSON B\n"
+                "  • IF value condition met → JSON A else JSON B\n"
+                "  • IF gimbal calib CSV OK (Az/El) → JSON A else JSON B",
                 "err",
             )
             return
@@ -2975,11 +3283,31 @@ class MainWindow(QMainWindow):
         self.act_view_playlist.setChecked(True)
         self.act_view_playlist.triggered.connect(self.toggle_playlist_panel)
         m_view.addAction(self.act_view_playlist)
+        m_view.addSeparator()
+
+        self.act_view_exec_log = QAction("Show execution log", self)
+        self.act_view_exec_log.setCheckable(True)
+        self.act_view_exec_log.triggered.connect(self.set_execution_log_visible)
+        m_view.addAction(self.act_view_exec_log)
+
+        self.act_view_playlist_log = QAction("Show playlist log", self)
+        self.act_view_playlist_log.setCheckable(True)
+        self.act_view_playlist_log.triggered.connect(self.set_playlist_log_visible)
+        m_view.addAction(self.act_view_playlist_log)
 
         m_help = bar.addMenu("&Help")
         a_readme = QAction("Open README", self)
         a_readme.triggered.connect(self.open_readme)
         m_help.addAction(a_readme)
+        m_help.addSeparator()
+
+        a_whatsnew = QAction("What's new", self)
+        a_whatsnew.triggered.connect(lambda: self._show_whatsnew(force=True))
+        m_help.addAction(a_whatsnew)
+
+        a_about = QAction(f"About {APP_NAME}", self)
+        a_about.triggered.connect(self._show_about)
+        m_help.addAction(a_about)
 
     def toggle_playlist_panel(self, checked):
         if checked:
@@ -2988,6 +3316,27 @@ class MainWindow(QMainWindow):
             self.main_splitter.setSizes([int(total * 0.66), int(total * 0.34)])
         else:
             self.playlist_box.hide()
+
+    def set_execution_log_visible(self, visible):
+        """Свернуть/развернуть лог выполнения (внутри вертикального сплиттера)."""
+        self.log_view.setVisible(visible)
+        self.btn_log_toggle.setText("▾ Hide" if visible else "▸ Show")
+        self.act_view_exec_log.blockSignals(True)
+        self.act_view_exec_log.setChecked(visible)
+        self.act_view_exec_log.blockSignals(False)
+        total = sum(self.left_splitter.sizes()) or 100
+        if visible:
+            self.left_splitter.setSizes([int(total * 0.62), int(total * 0.32)])
+        else:
+            self.left_splitter.setSizes([total - 36, 36])
+
+    def set_playlist_log_visible(self, visible):
+        """Свернуть/развернуть лог плейлиста (обычный layout — просто show/hide)."""
+        self.playlist_log_view.setVisible(visible)
+        self.btn_pl_log_toggle.setText("▾ Hide" if visible else "▸ Show")
+        self.act_view_playlist_log.blockSignals(True)
+        self.act_view_playlist_log.setChecked(visible)
+        self.act_view_playlist_log.blockSignals(False)
 
     def open_readme(self):
         path = os.path.join(os.path.dirname(__file__), "README.md")
@@ -3003,6 +3352,66 @@ class MainWindow(QMainWindow):
             self._log("Opened README.md", "ok")
         except Exception as e:
             self._log(f"Failed to open README.md: {e}", "err")
+
+    # ---------- версия / уведомление «что нового» ----------
+
+    def _state_path(self):
+        """Небольшой файл рядом с приложением, где хранится последняя показанная версия."""
+        base = os.path.dirname(os.path.abspath(__file__))
+        return os.path.join(base, "app_state.json")
+
+    def _read_state(self):
+        try:
+            with open(self._state_path(), encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def _write_state(self, state):
+        try:
+            with open(self._state_path(), "w", encoding="utf-8") as f:
+                json.dump(state, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            self._log(f"Could not save app state: {e}", "skip")
+
+    def _maybe_show_whatsnew(self):
+        """Показывает «What's new» один раз, когда версия сменилась."""
+        state = self._read_state()
+        if state.get("last_version") != APP_VERSION:
+            self._show_whatsnew(force=False)
+            state["last_version"] = APP_VERSION
+            self._write_state(state)
+
+    def _show_whatsnew(self, force=False):
+        """Окно с историей изменений. force=True — вызвано вручную из меню Help."""
+        # при автопоказе отображаем только записи новее ранее виденной версии
+        entries = CHANGELOG
+        if not force:
+            last = self._read_state().get("last_version")
+            if last:
+                entries = [e for e in CHANGELOG if e[0] != last] or CHANGELOG[:1]
+        box = QMessageBox(self)
+        box.setWindowTitle(f"What's new — {APP_NAME} v{APP_VERSION}")
+        box.setTextFormat(Qt.RichText)
+        box.setText(f"<b>{APP_NAME}</b> is now at <b>v{APP_VERSION}</b>.")
+        box.setInformativeText(changelog_html(entries))
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec()
+
+    def _show_about(self):
+        box = QMessageBox(self)
+        box.setWindowTitle(f"About {APP_NAME}")
+        box.setTextFormat(Qt.RichText)
+        box.setText(
+            f"<b>{APP_NAME}</b><br>Version {APP_VERSION}<br><br>"
+            "Visual, no-code desktop UI automation builder."
+        )
+        box.setInformativeText(
+            "See <b>Help → What's new</b> for the full change history, "
+            "or <b>Help → Open README</b> for full documentation."
+        )
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec()
 
     def _set_play_state(self, state):
         # state: idle|running|stopped
@@ -3047,6 +3456,7 @@ class MainWindow(QMainWindow):
             item.setData(Qt.UserRole, p)
             self.playlist_list.addItem(item)
         self._playlist_log(f"Added {len(files)} program(s).", "ok")
+        self._update_preview_bar()
 
     def playlist_remove_selected(self):
         rows = sorted({i.row() for i in self.playlist_list.selectedIndexes()}, reverse=True)
@@ -3054,6 +3464,9 @@ class MainWindow(QMainWindow):
             self.playlist_list.takeItem(r)
         if rows:
             self._playlist_log(f"Removed {len(rows)} program(s).", "ok")
+            if self._preview_index >= self.playlist_list.count():
+                self._preview_index = -1
+            self._update_preview_bar()
 
     def playlist_export(self):
         """Сохраняет текущий плейлист в файл (JSON-массив путей) для ветвления-в-плейлист."""
@@ -3103,6 +3516,8 @@ class MainWindow(QMainWindow):
             item.setToolTip(p)
             item.setData(Qt.UserRole, p)
             self.playlist_list.addItem(item)
+        self._preview_index = -1
+        self._update_preview_bar()
         self._playlist_log(f"Loaded playlist ({len(paths)} program(s)): {os.path.basename(path)}", "ok")
 
     def playlist_move(self, direction):
@@ -3115,6 +3530,58 @@ class MainWindow(QMainWindow):
         item = self.playlist_list.takeItem(row)
         self.playlist_list.insertItem(new_row, item)
         self.playlist_list.setCurrentRow(new_row)
+        self._update_preview_bar()
+
+    # ---------- переключатель предпросмотра (слева) ----------
+
+    def _on_playlist_item_clicked(self, item):
+        """Клик по пункту плейлиста (справа) — показать его шаги слева."""
+        self._preview_playlist_at(self.playlist_list.row(item))
+
+    def _preview_step(self, direction):
+        """Кнопки ◀ Prev / Next ▶ — пройтись по плейлисту по одному пункту."""
+        count = self.playlist_list.count()
+        if count == 0:
+            return
+        if not (0 <= self._preview_index < count):
+            row = 0 if direction > 0 else count - 1
+        else:
+            row = max(0, min(self._preview_index + direction, count - 1))
+        self._preview_playlist_at(row)
+
+    def _preview_playlist_at(self, row):
+        """Грузит шаги пункта плейлиста #row в левую таблицу для просмотра/правки."""
+        count = self.playlist_list.count()
+        if row < 0 or row >= count:
+            return
+        item = self.playlist_list.item(row)
+        path = item.data(Qt.UserRole)
+        name = os.path.basename(path) if path else item.text()
+        if not path or not os.path.isfile(path):
+            self._playlist_log(f"Cannot preview '{name}': file not found.", "err")
+            return
+        if not self._load_scenario_file(path, for_playlist=False):
+            return
+        self._preview_index = row
+        self.playlist_list.setCurrentRow(row)
+        self._update_preview_bar()
+
+    def _update_preview_bar(self):
+        """Обновляет надпись/кнопки над таблицей: какой файл сейчас показан."""
+        count = self.playlist_list.count()
+        if 0 <= self._preview_index < count:
+            item = self.playlist_list.item(self._preview_index)
+            path = item.data(Qt.UserRole) or ""
+            name = os.path.basename(path) if path else item.text()
+            self.preview_label.setText(
+                f"📄 {name}   —   [{self._preview_index + 1}/{count} in playlist]"
+            )
+        elif self._scenario_path:
+            self.preview_label.setText(f"📄 {os.path.basename(self._scenario_path)}")
+        else:
+            self.preview_label.setText("📄 (unsaved scenario)")
+        self.btn_preview_prev.setEnabled(count > 0)
+        self.btn_preview_next.setEnabled(count > 0)
 
     def _load_scenario_file(self, path, for_playlist=False):
         if not path or not os.path.isfile(path):
@@ -3180,6 +3647,9 @@ class MainWindow(QMainWindow):
             self._playlist_index += 1
             self._run_playlist_item()
             return
+        self._preview_index = self._playlist_index
+        self.playlist_list.setCurrentRow(self._playlist_index)
+        self._update_preview_bar()
         self._playlist_log(f"Running [{self._playlist_index + 1}/{self.playlist_list.count()}]: {name}", "info")
         self.run_scenario()
 
@@ -3293,6 +3763,8 @@ class MainWindow(QMainWindow):
             if self._playlist_active:
                 self._playlist_log(f"↷ Branch → {name}", "info")
             if self._load_scenario_file(next_path, for_playlist=self._playlist_active):
+                self._preview_index = -1   # цель ветки не обязательно пункт плейлиста
+                self._update_preview_bar()
                 self._log(f"↷ Branch: running {name}", "info")
                 self.run_scenario(from_branch=True)
                 return          # остальное продолжится после конца этого прогона
@@ -3322,13 +3794,17 @@ class MainWindow(QMainWindow):
         with open(path, "w", encoding="utf-8") as f:
             json.dump(self._all_steps(), f, ensure_ascii=False, indent=2)
         self._scenario_path = os.path.abspath(path)
+        self._preview_index = -1
+        self._update_preview_bar()
         self._log(f"Scenario saved: {path}", "ok")
 
     def load_scenario(self):
         path, _ = QFileDialog.getOpenFileName(self, "Load scenario", "", "JSON (*.json)")
         if not path:
             return
+        self._preview_index = -1
         self._load_scenario_file(path, for_playlist=False)
+        self._update_preview_bar()
 
 
 # ============================================================================
@@ -3441,4 +3917,6 @@ if __name__ == "__main__":
     app.setStyleSheet(APP_STYLE)
     win = MainWindow()
     win.show()
+    # уведомление «что нового» показываем после появления окна
+    QTimer.singleShot(400, win._maybe_show_whatsnew)
     sys.exit(app.exec())

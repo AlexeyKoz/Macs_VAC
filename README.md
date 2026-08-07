@@ -1,5 +1,9 @@
 # MACS Visual Automation
 
+**Version 1.3** · see the [Changelog](#changelog) for what changed. The app also
+shows a **"What's new"** popup automatically the first time you launch a new
+version, and you can reopen it any time via **Help → What's new**.
+
 A visual, no-code **desktop UI automation builder**. You build a scenario as a
 list of steps in a table, then press **▶ Run** and the app drives the mouse and
 keyboard to reproduce those steps on screen — clicking on-screen images it finds
@@ -29,6 +33,25 @@ folders that are numbered by an auto-incrementing serial number.
   full size.
 - **OCR** via Tesseract — check that a word appears on screen, or verify a
   **PASS/FAIL** keyword and automatically save a proof screenshot.
+- **Numeric value branching** — read numbers off the screen (e.g. a plot's
+  `Az ML` / `El ML` result) and branch on a condition like
+  `Az ML<=0.1 AND El ML<=0.1`. Supports `<= >= < > == !=`, `AND`/`OR`, and
+  `abs(...)` / `|...|` for tolerance checks; always saves a PASS/FAIL proof.
+- **Gimbal calibration CSV branching** — read a calibration CSV (Azimuth,
+  Elevation, Gain/Power columns), automatically find the Az/El boresight
+  offsets from the peak-gain point, and branch on a tolerance condition like
+  `abs(Az)<=0.3 AND abs(El)<=0.3`. Perfect for auto-looping back into a
+  recalibration scenario when the gimbal is out of tolerance.
+- **Conditional branching (decision nodes)** — route the workflow down Way A or
+  Way B based on an image, a word, or a numeric value. A branch target can be a
+  single scenario **or a whole playlist** that gets driven through in order.
+- **Unconditional playlist/scenario jump** — the *Move to another playlist/scenario*
+  action switches to another JSON as soon as it runs, no condition needed. Useful
+  for handing the workflow off to a different playlist once you've reached a result.
+- **Playlist preview switcher** — click any program in the playlist panel to load
+  its steps into the main table for viewing/editing; a bar above the table shows
+  the current file and its position in the playlist, with **◀ Prev / Next ▶**
+  buttons to step through every program one by one.
 - **"Find window" mode** — if a target isn't currently visible, the app cycles
   through open windows (Alt+Tab style) to locate it.
 - **Serial number tokens** — use `{serial}`, `{date}`, `{time}`, `{ts}` in paths
@@ -37,9 +60,17 @@ folders that are numbered by an auto-incrementing serial number.
   safety guard against deleting drive roots).
 - **Save / load scenarios** as JSON, so each program/workflow is its own file.
 - **Playlist runner (right panel)** — queue multiple scenario JSON files, reorder
-  them, run sequentially, and watch dedicated playlist status/log.
+  them, run sequentially, and watch dedicated playlist status/log. Playlists can
+  be **saved/loaded as reusable files** (💾 Save list… / 📂 Load list…) and used
+  as branch targets.
+- **Collapsible logs** — the Execution log and Playlist log start minimized to
+  keep the interface compact; a **▸ Show / ▾ Hide** button next to each header
+  (or **View → Show execution log / Show playlist log**) expands them on demand.
+- **Version tracking** — the title bar shows the version, a **What's new** popup
+  appears once per new version, and **Help → About / What's new** shows the full
+  change history.
 - **Top menu navigation** — File / View / Help for core actions (open/save,
-  playlist run, toggle playlist panel, open README).
+  playlist run, toggle playlist panel, toggle logs, open README, What's new / About).
 - **Live color-coded log** (green OK / red error / gray skipped).
 - **Runs in a background thread** so the GUI never freezes; **⏹ Stop** any time.
 - **Degrades gracefully** — the GUI still opens if automation libraries or the
@@ -126,11 +157,30 @@ Double-click or run:
 install_offline.bat
 ```
 
-This script automatically:
+This script installs everything needed, **step by step, in order**:
 
-1. Installs **Python 3.14.6** from `offline_installers\` (if Python is missing)
-2. Installs **Tesseract OCR** from the local installer (optional, for OCR steps)
-3. Creates `venv\` and installs all pip packages from `offline_packages\`
+1. **Python 3.14.x** — from `offline_installers\` (only if a matching Python
+   isn't already found).
+2. **Visual C++ Redistributable** — required by Qt/PySide6 (only if missing).
+3. **Tesseract OCR** — optional, only needed for *OCR check* / *Verify text*
+   steps (only if missing).
+4. **`venv\`** — created if it doesn't already exist (or rebuilt automatically
+   if it was built with the wrong Python version).
+5. **Pip packages** — installed from `offline_packages\` into `venv\`.
+
+It's **safe to re-run at any time** and is idempotent — anything already
+installed is detected and skipped, and only what's missing gets installed, so
+a partially-set-up PC (e.g. Python already there but no venv yet, or some pip
+packages already installed) is simply completed rather than starting over.
+If `venv\` already has everything working, the script does nothing at all and
+exits immediately.
+
+At the end it doesn't just trust that `pip` returned success — it **verifies**
+the install by actually importing every module the app needs
+(`PySide6`, `cv2`, `numpy`, `PIL`, `pyautogui`, `pytesseract`, `mss`,
+`pygetwindow`, `pyperclip`). If anything still fails to import, it prints the
+exact error and exits with a clear next step instead of reporting a false
+"success".
 
 Then start the app:
 
@@ -343,20 +393,27 @@ venv\Scripts\python.exe MACS_Visual_Automation.py
    For **branch** steps, use **↷ Branch setup** to pick Way A / Way B JSON files.
 4. Set the **Start delay** (seconds to switch to the target window before it
    begins) and the starting **Serial**.
-5. Press **▶ Run**. Watch the **Execution log** at the bottom. Press **⏹ Stop**
-   to abort.
+5. Press **▶ Run**. Watch the **Execution log** at the bottom (click **▸ Show**
+   next to its header if it's collapsed). Press **⏹ Stop** to abort.
 6. **💾 Save** / **📂 Load** your scenario as JSON.
 7. For chained runs, use the **playlist panel on the right**:
    - **➕ Add JSON** — add one or more scenario files.
    - **↑ / ↓** — reorder program execution order.
    - **▶ Run list** / **⏹ Stop list** — start/stop sequential execution.
    - status indicator: **blinking green** while running, **red** when stopped.
-   - **Playlist log** (below) shows file-level load/run issues separately.
+   - **Playlist log** (below) shows file-level load/run issues separately —
+     click its **▸ Show** button to expand it.
+   - **Click a program** to preview its steps in the left table; use
+     **◀ Prev / Next ▶** above the table to step through the whole list (see
+     [Playlist preview switcher](#playlist-preview-switcher-view-each-programs-steps)).
 
-8. Use the top menu for quick navigation:
+8. Both the **Execution log** and **Playlist log** start **minimized** to keep
+   things compact — expand only the one you need with its **▸ Show** button
+   (it becomes **▾ Hide** once expanded).
+9. Use the top menu for quick navigation:
    - **File** → Open/Save scenario, Add JSON to playlist, Run playlist, Exit
-   - **View** → Show/Hide playlist panel
-   - **Help** → Open `README.md`
+   - **View** → Show/Hide playlist panel, Show execution log, Show playlist log
+   - **Help** → Open `README.md`, **What's new**, **About** (shows version)
 
 > Safety: `pyautogui`'s fail-safe is **on** — slamming the mouse into a screen
 > corner aborts the run.
@@ -371,19 +428,111 @@ decision nodes in your scenario chain.
 
 ### How it works
 
-1. Add a branch step (one of the **IF … → JSON A else JSON B** actions).
+1. Add a branch step (one of the **IF … → A else B** actions).
 2. Set **Template / area**:
    - **Image branch** — PNG template to look for.
-   - **Text branch** — OCR region `x,y,w,h` (capture with 📷).
+   - **Text / value branch** — OCR region `x,y,w,h` (capture with 📷).
 3. Click **↷ Branch setup** and choose:
-   - **Way A** — JSON scenario to run if condition is **TRUE** (found / PASS).
-   - **Way B** — JSON to run if condition is **FALSE** (not found / FAIL).
+   - **Way A** — scenario (or playlist) to run if condition is **TRUE** (found / PASS).
+   - **Way B** — scenario (or playlist) to run if condition is **FALSE** (not found / FAIL).
    - Leave either side **empty** to continue the **remaining steps** in the
      current scenario instead of loading another file.
 4. When the branch step runs, remaining steps in the current JSON are **skipped**
-   if a Way A/B file was chosen. That JSON loads and runs automatically.
+   if a Way A/B target was chosen. That target loads and runs automatically.
 5. **Nested branches** work — a branch JSON can contain another branch step.
    The app follows the whole chain before advancing the playlist.
+
+### Branch targets can be playlists
+
+A Way A / Way B path may point to **a single scenario** *or* **a playlist file**:
+
+- **Scenario file** — a JSON array of step objects (a normal saved scenario).
+- **Playlist file** — a JSON array of scenario paths, or `{"playlist": [ ... ]}`.
+  When the branch selects a playlist, the app **drives through every scenario in
+  it, in order**, and then continues the chain. Create one easily from the
+  playlist panel with **💾 Save list…**.
+
+This is the recommended way to "go to another playlist" from a decision node —
+e.g. *if calibration is not perfect → run the whole re-calibration playlist*.
+
+### Numeric value branch (read a measured value)
+
+Use **IF value condition met → A else B (+ proof)** to branch on a **number** read
+from the screen (great for reading a result off a generated plot/report):
+
+1. Capture a **tight** OCR region (`x,y,w,h`) around the result text with 📷.
+2. In **↷ Branch setup**, enter a **condition**, for example:
+   - `Az ML<=0.1 AND El ML<=0.1` — perfect calibration.
+   - `abs(Az ML)<=0.1 AND abs(El ML)<=0.1` — tolerance around zero (recommended,
+     since values can be slightly negative).
+3. Operators: `<=  >=  <  >  ==  !=`. Combine clauses with `AND` / `OR`. Wrap a
+   label in `abs(...)` or `|...|` to compare the absolute value.
+4. The app reads the **first number after each label**
+   (e.g. `Az ML: [0.0, 35.99]` → `0.0`), evaluates the condition, and always
+   saves a **PASS/FAIL proof screenshot** to `results\`.
+   - **Way A** runs on **TRUE** (PASS) — e.g. your "success/finish" scenario.
+   - **Way B** runs on **FALSE** (FAIL) — e.g. the re-calibration playlist.
+
+> Tip: give the step a **Timeout** (e.g. 5 s). With a timeout it keeps
+> re-reading the region until the condition passes — useful if the plot renders
+> slowly. OCR on small plot text can be finicky, so capture a tight, high-contrast
+> region.
+
+### Gimbal calibration CSV branch (read Az/El offsets from a file)
+
+Use **IF gimbal calib CSV OK (Az/El) → A else B (+ proof)** to branch on the
+result of a **gimbal calibration CSV** instead of reading numbers off the
+screen. This is the recommended way to check calibration results that were
+exported to a file (e.g. `calib.csv` written after a calibration run) and
+loop back into a fresh calibration when the gimbal is out of tolerance.
+
+1. Set **Template / area** to the path of the calibration CSV, e.g. `calib.csv`
+   (tokens like `{serial}` work too). The CSV needs `Azimuth`, `Elevation`, and
+   either an `Antenna Gain` or `Power Received` column (column names are matched
+   loosely, case-insensitive).
+2. The app finds the **raw peak-gain point** on each cut:
+   - **Az offset** = azimuth value at the highest gain among rows where
+     elevation is closest to `0`.
+   - **El offset** = elevation value at the highest gain among rows where
+     azimuth is closest to `0`.
+3. In **↷ Branch setup**, enter a **condition** using labels `Az` / `El`, e.g.:
+   - `abs(Az)<=0.3 AND abs(El)<=0.3` — calibration within ±0.3° (recommended,
+     tolerant of small negative offsets).
+   - `Az==0 AND El==0` — perfect calibration only.
+4. Operators: `<=  >=  <  >  ==  !=`. Combine clauses with `AND` / `OR`. Wrap a
+   label in `abs(...)` or `|...|` to compare the absolute value.
+   - **Way A** runs on **TRUE** (calibration OK) — continue the workflow.
+   - **Way B** runs on **FALSE** (out of tolerance) — point it at your
+     recalibration scenario (adjust the tolerance on the gimbal, calibrate
+     again), building a retry loop.
+5. A PASS/FAIL report is always saved to `results\` as a `.txt` file with the
+   computed offsets and peak gain values. If a `<csv name>_Pattern.png` file
+   (e.g. `calib_Pattern.png` next to `calib.csv`) exists, it's copied alongside
+   the report as visual proof.
+
+> Tip: combine this with a playlist Way B target (see
+> [Branch targets can be playlists](#branch-targets-can-be-playlists)) to run a
+> full "adjust tolerance → recalibrate → re-check" loop automatically.
+
+### Unconditional jump (no condition needed)
+
+Sometimes you don't need a decision — you just want the workflow to hand off
+to another playlist or scenario once it reaches a certain point (e.g. "we've
+got a result, now keep going with the follow-up playlist"). Use **Move to
+another playlist/scenario** for that:
+
+1. Set **Template / area** to the path of the playlist or scenario JSON to
+   jump to (tokens like `{serial}` work too).
+2. As soon as this step executes, the rest of the current scenario is skipped
+   and the app switches straight to that JSON — same mechanism as a branch's
+   Way A/B, just without a condition to evaluate.
+3. If the target is a **playlist file**, the whole playlist is driven through
+   in order (see [Branch targets can be playlists](#branch-targets-can-be-playlists)).
+
+This is the simplest way to chain "if I've reached this point in my scenario,
+keep going with a different playlist depending on where I ended up" without
+setting up a branch condition at all — put it at the end of one path and point
+it at the next playlist.
 
 ### Example flow
 
@@ -406,9 +555,13 @@ fail_flow.json  → log error, notify operator…
 | **IF template found** | Is a UI image visible? | Different screens/dialogs |
 | **IF word found (OCR)** | Is a keyword in a region? | PASS/FAIL text, status labels |
 | **IF word found (+ proof)** | Same as OCR + saves `results\PASS_…png` or `FAIL_…png` | Test stations needing proof |
+| **IF value condition met (+ proof)** | Reads numbers from a region and checks a condition (`Az ML<=0.1 AND El ML<=0.1`) + saves proof | Reading measured results off plots/reports |
+| **IF gimbal calib CSV OK (+ proof)** | Reads a calibration CSV, computes Az/El offsets, checks a condition (`abs(Az)<=0.3 AND abs(El)<=0.3`) + saves a report | Gimbal calibration pass/fail + recalibration loop |
 
-Paths in branch setup are stored **relative to the current scenario folder**
-when possible, so you can move `scenarios\` as a group.
+Any Way A / Way B target can be a **single scenario or a playlist file** (see
+[Branch targets can be playlists](#branch-targets-can-be-playlists)). Paths in
+branch setup are stored **relative to the current scenario folder** when
+possible, so you can move `scenarios\` as a group.
 
 ---
 
@@ -431,6 +584,9 @@ when possible, so you can move `scenarios\` as a group.
 | **IF template found → JSON A else JSON B** | **Branch node:** checks if template is on screen; loads Way A or Way B JSON | `wayA.json \| wayB.json` (use **↷ Branch setup**) |
 | **IF word found (OCR) → JSON A else JSON B** | **Branch node:** OCR region + keyword; loads Way A or Way B JSON | `word \| wayA.json \| wayB.json` |
 | **IF word found (+ proof) → JSON A else JSON B** | Like OCR branch + saves PASS/FAIL proof; never fails the step | `word \| wayA.json \| wayB.json` |
+| **IF value condition met → A else B (+ proof)** | Reads numbers via OCR and checks a numeric condition; saves PASS/FAIL proof. A/B may be a scenario **or a playlist** | `Az ML<=0.1 AND El ML<=0.1 \| wayA \| wayB` (use **↷ Branch setup**) |
+| **IF gimbal calib CSV OK → A else B (+ proof)** | **Branch node:** reads a gimbal calibration CSV (Template/area = path to the CSV), computes the Az/El boresight offsets, and checks a numeric condition; saves a PASS/FAIL `.txt` report (+ a copy of `<csv>_Pattern.png` if present). A/B may be a scenario **or a playlist** | `abs(Az)<=0.3 AND abs(El)<=0.3 \| wayA \| wayB` (use **↷ Branch setup**) |
+| **Move to another playlist/scenario** | **Unconditional jump:** as soon as this step runs, the app switches straight to the given JSON — no condition, no Way A/B. The rest of the current scenario is skipped, just like a branch that always takes one path | Template/area = path to a playlist or scenario JSON |
 | **Screenshot of area** | Save a screenshot (region = template/area field) | name, e.g. `unit_{serial}\log.png` |
 | **Select folder/file** | Remember a path for the next folder step | path to select |
 | **Create folder** | Create a folder (also becomes "selected") | `results\unit_{serial}` |
@@ -492,6 +648,34 @@ How it behaves:
   continues with the next item.
 - **⏹ Stop list** stops the current run and the remaining queue.
 
+### Save / load a playlist as a file
+
+- **💾 Save list…** — export the current panel as a playlist file
+  (`{"playlist": [ ...scenario paths... ]}`). Paths are stored relative to the
+  file when possible, so the folder can be moved as a group.
+- **📂 Load list…** — load a playlist file back into the panel (replaces the
+  current list).
+
+A saved playlist file is exactly what a **branch** step can point to as Way A or
+Way B — so a decision node can send the workflow into an entire playlist. See
+[Branch targets can be playlists](#branch-targets-can-be-playlists).
+
+### Playlist preview switcher (view each program's steps)
+
+A bar above the main table shows **which file is currently loaded** and, when
+it's part of the playlist, its position — e.g. `📄 pass_flow.json — [2/4 in
+playlist]` — with **◀ Prev / Next ▶** buttons next to it.
+
+- **Click any program** in the right-hand playlist list to instantly load its
+  steps into the left-hand table, so you can inspect or edit it.
+- **◀ Prev / Next ▶** step through every program in the playlist one at a
+  time, in order — handy for reviewing a whole playlist without clicking each
+  item individually.
+- While **▶ Run list** is executing, the bar automatically follows along and
+  highlights the program currently running, so you always know where you are.
+- Clicking a program **loads it exactly like Open/Load** does — it becomes the
+  table you're editing, so **💾 Save** saves changes back to that file.
+
 ---
 
 ## Scenario file format
@@ -512,7 +696,8 @@ Scenarios are plain JSON — a list of step objects. Each step:
 
 - `enabled` — whether the step runs (the "On" checkbox).
 - `action` — internal action key (see the code's `ACTIONS` map).
-- `image` — template PNG path, or OCR region `x,y,w,h`.
+- `image` — template PNG path, OCR region `x,y,w,h`, or (for `branch_calib`) a
+  path to a calibration CSV.
 - `value` — action-specific input (see table above).
 - `timeout` — seconds to search before failing.
 - `find_window` — cycle windows to find a hidden target.
@@ -576,13 +761,84 @@ Captured templates are stored under `templates\`, and proof/screenshots under
 
 ---
 
+## Changelog
+
+The in-app history lives in the `CHANGELOG` list at the top of
+`MACS_Visual_Automation.py`, next to `APP_VERSION`. The app shows a **What's new**
+popup once whenever `APP_VERSION` changes (it remembers the last-seen version in
+`app_state.json`).
+
+> **Maintaining versions:** when you add a feature, bump `APP_VERSION` and add a
+> new entry at the **top** of `CHANGELOG` (`(version, date, [changes])`) — the
+> popup, the **Help → What's new** dialog, and this file should stay in sync.
+
+### Version 1.3 — 2026-08-07
+
+- **Collapsible logs**: the Execution log (left panel) and Playlist log (right
+  panel) now start **minimized** to keep the interface compact. Each has a
+  small **▸ Show / ▾ Hide** button next to its header to expand/collapse it.
+- **New View menu items**: **Show execution log** and **Show playlist log**
+  (checkable, kept in sync with the inline buttons) join the existing **Show
+  playlist panel** option for controlling screen real estate from one place.
+- No new Python packages required — UI-only change.
+
+### Version 1.2 — 2026-08-07
+
+- **New action — unconditional jump** (`goto_playlist`): *Move to another
+  playlist/scenario*. Put a playlist or scenario JSON path in Template/area
+  and the run switches to it as soon as the step executes — no condition, no
+  Way A/B. Ideal for handing the workflow off to another playlist once you've
+  reached a result.
+- **Playlist preview switcher**: click any program in the playlist panel to
+  load its steps into the main table for viewing/editing. A new bar above the
+  table shows the current file and its position in the playlist, with
+  **◀ Prev / Next ▶** buttons to step through every program one by one. The
+  bar also follows along automatically while a playlist runs.
+
+### Version 1.1 — 2026-08-06
+
+- **New action — gimbal calibration CSV branch** (`branch_calib`): *IF gimbal
+  calib CSV OK (Az/El) → A else B (+ proof)*. Reads a calibration CSV
+  (Azimuth, Elevation, Gain/Power columns), computes the Az/El boresight
+  offsets from the peak-gain point on each raw cut, and evaluates conditions
+  such as `abs(Az)<=0.3 AND abs(El)<=0.3`.
+- **Way A = calibration OK, Way B = out of tolerance** — point Way B at a
+  recalibration scenario (adjust tolerance, calibrate again) to build a retry
+  loop directly from the automation.
+- Saves a PASS/FAIL `.txt` report to `results\` with the computed offsets; if
+  a `<csv name>_Pattern.png` sits next to the CSV, it's copied there too as
+  visual proof.
+- No new Python packages required — the CSV is parsed with the built-in `csv`
+  module.
+
+### Version 1.0 — 2026-08-06
+
+First versioned release — the baseline for change tracking.
+
+- **New action — numeric value branch** (`branch_value`): *IF value condition met
+  → A else B (+ proof)*. Reads numbers via OCR and evaluates conditions such as
+  `Az ML<=0.1 AND El ML<=0.1` (operators `<= >= < > == !=`, `AND`/`OR`, and
+  `abs(...)` / `|...|` for tolerance). Always saves a PASS/FAIL proof screenshot.
+- **Branch into a playlist:** Way A / Way B can point to a **playlist file** and
+  the whole playlist is driven through in order (not just a single scenario).
+- **Playlist save/load:** new **💾 Save list… / 📂 Load list…** buttons to export
+  and reuse a playlist as a file (ideal as a branch target).
+- **Anti-loop guard** raised to 200 branch hops to support re-calibration loops.
+- **Version tracking:** title-bar version, first-run **What's new** popup, and
+  **Help → What's new / About** dialogs.
+
+---
+
 ## Project files
 
 - `MACS_Visual_Automation.py` — the application (GUI + automation engine).
+- `app_state.json` — remembers the last-seen version for the What's new popup
+  (created on first run; safe to delete — it just re-shows the popup once).
 - `test_match.py` — standalone template-matching diagnostic tool.
 - `requirements.txt` — Python dependencies.
 - `download_packages.bat` — download Python, Tesseract, and pip wheels (online PC).
-- `install_offline.bat` — install everything from local folders (offline PC).
+- `install_offline.bat` — idempotently install everything from local folders
+  (offline PC); skips what's already installed and verifies the result.
 - `run_app.bat` — start the app using the virtual environment.
 - `build.bat` / `MACS_Visual_Automation.spec` — build a standalone `.exe` with PyInstaller.
 - `offline_installers\` — Python and Tesseract installers (created by download script).
